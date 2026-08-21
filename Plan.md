@@ -2,7 +2,7 @@
 
 ## Resumen
 
-Crear una estrategia Pine Script v6 para gráficos diarios de empresas con fundamentales. Será long-only, invertirá el 100% del patrimonio y reconstruirá el BPA TTM usando los cuatro últimos resultados publicados.
+Crear una estrategia Pine Script v6 para gráficos diarios estándar de empresas con fundamentales. Será long-only, asignará prácticamente el 100% del patrimonio entre posición y coste de entrada, y reconstruirá el BPA TTM usando los cuatro últimos resultados publicados.
 
 La señal se calculará con el PER de apertura y las bandas conocidas antes de comenzar la sesión. Cuando se active, la operación se ejecutará mediante una orden de mercado al cierre de esa misma sesión.
 
@@ -29,7 +29,7 @@ La señal se calculará con el PER de apertura y las bandas conocidas antes de c
   - Estar fuera del mercado.
   - PER válido.
   - `PER_apertura <= banda_compra_anterior`.
-  - Comprar el 100% del patrimonio al cierre de esa sesión.
+  - Comprar al cierre de esa sesión con el nominal máximo que, sumado al coste de entrada, no exceda el 100% del patrimonio.
 - Salida:
   - Tener una posición abierta.
   - `PER_apertura >= banda_venta_anterior`.
@@ -37,6 +37,7 @@ La señal se calculará con el PER de apertura y las bandas conocidas antes de c
 - Si el PER queda inválido, cerrar la posición al cierre de la primera sesión que abra con ese estado y suspender las compras.
 - Configurar `process_orders_on_close = true` para que TradingView rellene las órdenes de mercado en el cierre de la vela que genera la operación. [Ejecución de órdenes en TradingView](https://www.tradingview.com/pine-script-docs/faq/strategies/#why-are-my-orders-executed-on-the-bar-following-my-triggers).
 - Los resultados publicados en una fecha solo modificarán el BPA utilizado desde la siguiente sesión bursátil, incluso si el informe se publicó antes de la apertura.
+- La fecha final debe coincidir con una sesión bursátil. No abrir nuevas posiciones ese día y liquidar cualquier posición existente en su cierre.
 - Sin piramidación, posiciones cortas, apalancamiento, órdenes límite ni stop-loss.
 - Aplicar un coste del 0,035% por compra o venta:
   - 2,5 bps de medio spread.
@@ -82,6 +83,7 @@ El Sharpe personalizado puede diferir del nativo porque TradingView calcula su m
 - Validar manualmente BPA TTM, media, desviación y bandas en varias fechas.
 - Comprobar la expulsión de observaciones con más de 365 días naturales.
 - Confirmar el coste de 0,035% en cada lado.
+- Confirmar que el dimensionamiento de la entrada no genera operaciones `Margin Call`.
 - Comparar resultado total y máximo drawdown con el informe nativo.
 - Probar BPA negativo, trimestre ausente, historial insuficiente y activos como SPY o SPX: deberán permanecer sin operar y mostrar el motivo.
 

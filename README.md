@@ -1,90 +1,109 @@
-# TradingView Backtesting: reversión a la media del PER
+# Estrategia de reversión a la media del PER en TradingView
 
-Estrategia long-only para TradingView que prueba una reversión a la media del PER de una empresa usando precios diarios y BPA trimestral publicado. El modelo evita utilizar el BPA de un informe antes de su fecha de publicación.
+Esta estrategia busca aprovechar desviaciones del PER de una empresa respecto a su comportamiento reciente. Utiliza precios diarios y únicamente resultados empresariales que ya habían sido publicados en cada fecha del backtest.
 
-La especificación completa y sus decisiones de diseño están en [Plan.md](Plan.md).
+La especificación funcional completa se encuentra en [Plan.md](Plan.md).
 
-## Archivos
+## Requisitos
 
-- `pe_mean_reversion_strategy.pine`: estrategia Pine Script v6 lista para copiar en TradingView.
-- `Plan.md`: definición funcional, supuestos y criterios de prueba.
+- Una cuenta de TradingView con acceso al Pine Editor.
+- Un gráfico de una empresa con resultados trimestrales disponibles.
+- Tipo de gráfico estándar de velas o barras.
+- Temporalidad de 1 día.
 
-## Cómo utilizarla
+No está diseñada para ETF, índices, criptomonedas ni activos sin resultados trimestrales compatibles.
 
-1. Abre en TradingView el gráfico de una empresa con resultados trimestrales disponibles, por ejemplo `NASDAQ:MSFT`.
-2. Selecciona un gráfico estándar de **1 día**. La estrategia genera un error intencionado en otros marcos temporales.
-3. Abre el Pine Editor, copia el contenido de `pe_mean_reversion_strategy.pine` y pulsa **Añadir al gráfico**.
-4. Revisa en **Configuración → Inputs** las fechas, la ventana, el multiplicador de las bandas y la tasa libre de riesgo.
-5. Consulta las operaciones y la curva de patrimonio en el informe de estrategia de TradingView.
+## Cómo cargar la estrategia
 
-La estrategia se declara con un capital inicial de 100.000 unidades monetarias y usa el 100% del patrimonio en cada posición. Estos valores pueden cambiarse en las propiedades de la estrategia.
+1. Abre TradingView y carga el gráfico de una empresa, por ejemplo NASDAQ:MSFT.
+2. Selecciona un gráfico estándar con temporalidad **1D**.
+3. Abre la pestaña **Pine Editor**.
+4. Crea una estrategia nueva y sustituye su contenido por el de pe_mean_reversion_strategy.pine.
+5. Guarda el script.
+6. Pulsa **Añadir al gráfico**.
+7. Abre la configuración de la estrategia para elegir el período del backtest y revisar el resto de parámetros.
+8. Consulta las operaciones, la curva de patrimonio y las métricas en el informe de estrategia de TradingView.
 
-## Secuencia punto-en-tiempo
+## Parámetros principales
 
-En cada sesión diaria se respeta este orden:
+- **Ventana del PER:** número de días naturales usados para estimar su media y dispersión.
+- **Mínimo de aperturas válidas:** observaciones exigidas antes de permitir operaciones.
+- **Distancia de las bandas:** separación de los niveles de compra y venta respecto a la media.
+- **Inicio y fin:** fechas inclusivas del backtest. La fecha final debe ser una sesión bursátil.
+- **Tasa libre de riesgo:** referencia utilizada para calcular el Sharpe diario personalizado.
+- **Visualización:** permite ocultar o mostrar bandas, publicaciones, señales, fondo de estado y tabla resumen.
 
-1. Se conserva el BPA TTM que era conocido antes de la apertura.
-2. Se calcula `PER_apertura = open / BPA_TTM`.
-3. El PER de apertura se compara con las bandas finalizadas en la sesión anterior.
-4. Si existe señal, se compra o vende al cierre de la misma sesión mediante una orden de mercado Market-on-Close simulada con `process_orders_on_close = true`.
-5. El PER de la apertura se añade a la ventana histórica.
-6. Si TradingView vincula un informe a esa fecha, su BPA se incorpora al final del cálculo y solo puede utilizarse desde la sesión siguiente.
+El capital inicial, el tamaño de las posiciones y otras propiedades del emulador pueden revisarse desde la pestaña **Propiedades** de la estrategia.
 
-Esta secuencia impide que el BPA publicado durante una fecha intervenga en el PER de la apertura de esa misma fecha.
+## Principios de la estrategia
 
-## Fundamentales y bandas
+### Información punto-en-tiempo
 
-La fecha de cada evento se detecta con `request.earnings(..., earnings.actual)` y el BPA empleado en el cálculo es `earnings.standardized`, que TradingView define como BPA diluido GAAP estandarizado.
+El BPA TTM se forma con los cuatro últimos resultados trimestrales publicados. Un resultado nuevo no afecta a la apertura de su propia fecha de publicación: empieza a utilizarse en la siguiente sesión.
 
-El BPA TTM es la suma de los cuatro últimos informes consecutivos. Si uno no tiene BPA estandarizado, o la suma es cero o negativa, el PER se considera inválido. En ese estado no se abren posiciones y cualquier posición existente se cierra al final de la primera sesión afectada.
+El PER se considera inválido si todavía no existen cuatro informes compatibles, falta algún BPA o la suma de los cuatro BPA es cero o negativa. Mientras sea inválido no se abren posiciones y una posición existente se cierra.
 
-La distribución utiliza el PER punto-en-tiempo de las aperturas contenidas en los últimos 365 días naturales:
+### Reversión a la media
 
-- Compra: `media − 0,89 × desviación estándar`.
-- Venta: `media + 0,89 × desviación estándar`.
-- Desviación estándar poblacional.
-- Calentamiento mínimo: una ventana natural completa y 200 aperturas válidas.
+Cada apertura se compara con la distribución de los PER observados durante los últimos 365 días naturales:
 
-La observación del día actual no participa en las bandas contra las que ella misma se compara.
+- Se compra cuando el PER de apertura está en la banda inferior o por debajo.
+- Se vende cuando el PER de apertura está en la banda superior o por encima.
+- La observación actual no participa en las bandas contra las que se compara.
+- Antes de operar se exige una ventana temporal completa y un mínimo de 200 aperturas válidas.
 
-## Costes y ejecución
+La estrategia es exclusivamente compradora: no abre cortos, no piramida y no utiliza stop-loss ni órdenes límite.
 
-Cada compra o venta soporta un coste del **0,035%**:
+## Ejecución simulada
 
-- 2,5 puntos básicos de medio spread.
-- 1 punto básico de comisión.
-- 0,07% para una operación completa de entrada y salida.
+La señal utiliza información disponible en la apertura, pero la operación se simula al cierre de esa misma sesión. Esto representa una orden Market-on-Close preparada durante el día.
 
-El emulador de TradingView rellena las órdenes en el cierre de la vela de señal. Esto representa una orden Market-on-Close preparada durante la sesión; no garantiza que una alerta real emitida después del cierre pueda obtener ese mismo precio.
+Se aplica un coste del 0,035% tanto en la compra como en la venta. El nominal reserva una pequeña parte del patrimonio para cubrir el coste de entrada sin utilizar apalancamiento.
 
-No se utilizan posiciones cortas, apalancamiento, piramidación, órdenes límite ni stop-loss.
+En la última sesión del período no se abren posiciones nuevas y cualquier posición existente se liquida al cierre.
 
-## Resultados
+## Cómo interpretar los resultados
 
-Además del informe nativo de TradingView, el script muestra un resumen con:
+El panel inferior muestra el PER de apertura, su media histórica y las bandas de compra y venta. Los marcadores E identifican fechas de publicación de resultados, y las etiquetas de compra y venta aparecen sobre el gráfico principal.
 
-- Rentabilidad total, incluido el beneficio o pérdida abierto.
-- Máximo drawdown intradiario calculado por TradingView.
-- Máxima duración close-to-close por debajo del máximo de equity, en días naturales.
-- Sharpe anualizado a partir de retornos diarios y 252 sesiones anuales.
-- BPA TTM, PER, media, bandas y número de operaciones.
+La tabla resumen incluye:
 
-La tasa libre de riesgo del Sharpe personalizado es configurable y vale 2% por defecto. El Sharpe nativo de TradingView también usa 2%, pero se calcula con retornos mensuales y puede diferir.
+- Estado actual del modelo.
+- BPA TTM disponible para la próxima sesión.
+- PER, media y bandas.
+- Rentabilidad total.
+- Máximo drawdown.
+- Duración máxima del drawdown.
+- Sharpe anualizado.
+- Número de operaciones.
 
-## Alcance y limitaciones
+Los Pine Logs se limitan a los eventos importantes: disponibilidad del modelo, publicaciones de resultados, cambios a BPA inválido y órdenes de entrada o salida.
 
-- La primera versión está diseñada para empresas con cuatro eventos trimestrales compatibles. ETF e índices como SPY o SPX normalmente mostrarán `BPA TTM no válido` y no operarán.
-- Las fechas y valores dependen del proveedor de datos de TradingView.
-- Pine permite alinear el BPA con el día del informe, pero no expone versiones históricas auditables de todas las correcciones posteriores del proveedor.
-- La estrategia ignora deliberadamente si un informe fue publicado antes o después de la apertura y espera siempre a la sesión siguiente para utilizarlo.
-- El backtest no garantiza resultados futuros.
+## Supuestos del backtest
 
-## Comprobaciones recomendadas
+- Los datos diarios y fundamentales proporcionados por TradingView son correctos.
+- La fecha asociada a un resultado representa su fecha de publicación.
+- Un resultado se utiliza siempre desde la sesión siguiente, aunque se publicara antes de la apertura.
+- Las señales conocidas durante la sesión pueden prepararse para una ejecución Market-on-Close.
+- El precio de cierre de la vela es el precio de ejecución empleado por el emulador.
+- Los costes son constantes y no dependen de liquidez, tamaño o volatilidad.
+- El Sharpe personalizado utiliza retornos diarios y 252 sesiones anuales.
 
-Antes de interpretar resultados:
+## Limitaciones
 
-1. Activa los eventos de resultados de TradingView y confirma que los marcadores `E` coinciden con ellos.
-2. Comprueba que el nuevo BPA TTM aparece en el panel al cierre del informe y que el PER no lo utiliza hasta la siguiente barra.
-3. Revisa varias entradas y salidas: la señal debe depender del PER de apertura y el precio ejecutado debe ser el cierre de la misma vela.
-4. Compara el máximo drawdown del panel con el informe nativo.
-5. Repite la prueba con costes distintos desde las propiedades si quieres modelar otro bróker.
+- TradingView puede corregir retrospectivamente datos fundamentales; Pine no permite auditar todas sus versiones históricas.
+- La disponibilidad y calidad del BPA varía entre empresas y mercados.
+- El gráfico diario no permite distinguir con precisión publicaciones anteriores o posteriores a la apertura.
+- Una ejecución real enviada al terminar la sesión puede no conseguir el mismo precio de cierre que el emulador.
+- No se modelan impuestos, impacto de mercado, deslizamiento variable, dividendos ni restricciones específicas de cada bróker.
+- El resultado depende de los parámetros, del período elegido y del universo analizado.
+- Un backtest favorable no garantiza resultados futuros.
+
+## Comprobaciones antes de usar los resultados
+
+1. Confirma que los marcadores de resultados coinciden con los eventos mostrados por TradingView.
+2. Verifica que un BPA nuevo empieza a afectar al PER en la sesión posterior.
+3. Revisa que las operaciones se ejecutan al cierre de la vela que contiene la señal.
+4. Comprueba que la fecha final corresponde a una sesión bursátil.
+5. Confirma en el informe que no existen liquidaciones por margen.
+6. Compara la rentabilidad y el drawdown del panel con el informe nativo.
