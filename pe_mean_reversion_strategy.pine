@@ -5,7 +5,7 @@ strategy(
      overlay = false,
      initial_capital = 100000,
      default_qty_type = strategy.percent_of_equity,
-     default_qty_value = 100,
+     default_qty_value = 99.965,
      pyramiding = 0,
      commission_type = strategy.commission.percent,
      commission_value = 0.035,
@@ -16,18 +16,22 @@ strategy(
      risk_free_rate = 2.0
  )
 
-// Esta estrategia debe ejecutarse en un gráfico diario estándar. Los resultados
-// publicados en una barra se incorporan después de calcular la señal de esa barra,
-// por lo que solo pueden afectar a la apertura de la sesión siguiente.
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Inputs
+// Configuración
 // ─────────────────────────────────────────────────────────────────────────────
 
-string GROUP_MODEL = "Modelo"
-string GROUP_PERIOD = "Período del backtest"
-string GROUP_METRICS = "Métricas"
-string GROUP_VISUALS = "Visualización"
+const string GROUP_MODEL = "Modelo"
+const string GROUP_PERIOD = "Período del backtest"
+const string GROUP_METRICS = "Métricas"
+const string GROUP_VISUALS = "Visualización"
+
+const int MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
+const float COMMISSION_RATE = 0.00035
+const int ACTION_NONE = 0
+const int ACTION_ENTRY = 1
+const int ACTION_EXIT_BAND = 2
+const int ACTION_EXIT_INVALID_EPS = 3
+const int ACTION_EXIT_PERIOD_END = 4
 
 int lookbackDaysInput = input.int(
      365,
@@ -43,7 +47,7 @@ int minObservationsInput = input.int(
      minval = 2,
      maxval = 2500,
      group = GROUP_MODEL,
-     tooltip = "La estrategia no opera hasta tener, como mínimo, este número de observaciones válidas dentro de la ventana."
+     tooltip = "La estrategia no opera hasta reunir este número de observaciones válidas."
  )
 float sigmaInput = input.float(
      0.89,
@@ -52,25 +56,25 @@ float sigmaInput = input.float(
      step = 0.01,
      group = GROUP_MODEL
  )
-
 int startTimeInput = input.time(
      timestamp("01 Jan 2000 00:00 +0000"),
      "Inicio",
-     group = GROUP_PERIOD
+     group = GROUP_PERIOD,
+     tooltip = "Fecha inicial inclusiva, interpretada en la zona horaria del mercado."
  )
 int endTimeInput = input.time(
      timestamp("31 Dec 2099 23:59 +0000"),
      "Fin",
-     group = GROUP_PERIOD
+     group = GROUP_PERIOD,
+     tooltip = "Fecha final inclusiva. Debe coincidir con una sesión bursátil."
  )
-
 float riskFreeRateInput = input.float(
      2.0,
      "Tasa libre de riesgo anual (%)",
      minval = -99.0,
      step = 0.1,
      group = GROUP_METRICS,
-     tooltip = "Se usa en el Sharpe diario personalizado. El informe nativo de TradingView conserva el 2% declarado en strategy()."
+     tooltip = "Se usa en el Sharpe diario personalizado."
  )
 
 bool showBandsInput = input.bool(true, "Mostrar PER y bandas", group = GROUP_VISUALS)
@@ -79,29 +83,33 @@ bool showSignalsInput = input.bool(true, "Marcar señales en el precio", group =
 bool showInvalidBackgroundInput = input.bool(true, "Sombrear PER inválido", group = GROUP_VISUALS)
 bool showDashboardInput = input.bool(true, "Mostrar resumen", group = GROUP_VISUALS)
 
-if barstate.isfirst and (not timeframe.isdaily or timeframe.multiplier != 1)
-    runtime.error("Esta estrategia requiere un gráfico de 1 día (1D).")
-
-if barstate.isfirst and startTimeInput >= endTimeInput
-    runtime.error("La fecha de inicio debe ser anterior a la fecha final.")
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Estados encapsulados
 // ─────────────────────────────────────────────────────────────────────────────
 
-f_ttmEps(array<float> epsValues) =>
-    bool hasFourReports = array.size(epsValues) == 4
-    bool allValuesAvailable = hasFourReports
-    float total = 0.0
-    if hasFourReports
-        for index = 0 to 3
-            float value = array.get(epsValues, index)
-            if na(value)
-                allValuesAvailable := false
-            else
-                total += value
-    float validTotal = allValuesAvailable and total > 0.0 ? total : na
-    [validTotal, not na(validTotal)]
+type EpsHistory
+    array<float> values
+
+type PerWindow
+    array<int> times
+    array<float> values
+    int firstValidTime = na
+
+type ReturnStats
+    float previousEquity = na
+    int count = 0
+    float mean = 0.0
+    float m2 = 0.0
+
+type DrawdownState
+    float peak = na
+    int peakTime = na
+    int startTime = na
+    int maximumDuration = 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Funciones del modelo
+// ─────────────────────────────────────────────────────────────────────────────
 
 f_number(float value) =>
     na(value) ? "n/d" : str.tostring(value, "#.##")
@@ -109,8 +117,213 @@ f_number(float value) =>
 f_percent(float value) =>
     na(value) ? "n/d" : str.tostring(value, "#.##") + "%"
 
+f_dateKey(int timestampValue) =>
+    year(timestampValue, syminfo.timezone) * 10000 +
+     month(timestampValue, syminfo.timezone) * 100 +
+     dayofmonth(timestampValue, syminfo.timezone)
+
+f_periodState(int currentTime, int previousTime, int startTime, int endTime) =>
+    int currentDate = f_dateKey(currentTime)
+    int previousDate = na(previousTime) ? na : f_dateKey(previousTime)
+    int startDate = f_dateKey(startTime)
+    int endDate = f_dateKey(endTime)
+    bool insideBacktestPeriod = currentDate >= startDate and currentDate <= endDate
+    bool onFinalBacktestSession = currentDate == endDate
+    bool finalBacktestSessionMissing = currentDate > endDate and (na(previousDate) or previousDate < endDate)
+    [insideBacktestPeriod, onFinalBacktestSession, finalBacktestSessionMissing]
+
+method ttm(EpsHistory this) =>
+    int reportCount = array.size(this.values)
+    bool complete = reportCount == 4
+    bool valuesAvailable = complete
+    float total = 0.0
+
+    if complete
+        for index = 0 to 3
+            float value = array.get(this.values, index)
+            valuesAvailable := valuesAvailable and not na(value)
+            total += na(value) ? 0.0 : value
+
+    bool epsValid = valuesAvailable and total > 0.0
+    float epsTtm = epsValid ? total : na
+    string epsStatus = if not complete
+        "Faltan " + str.tostring(4 - reportCount) + " informes"
+    else if not valuesAvailable
+        "Falta BPA estandarizado"
+    else if not epsValid
+        "BPA TTM <= 0"
+    else
+        "BPA válido"
+    [epsTtm, epsValid, epsStatus]
+
+method add(EpsHistory this, float standardizedEps) =>
+    array.push(this.values, standardizedEps)
+    if array.size(this.values) > 4
+        array.shift(this.values)
+    this
+
+method prune(PerWindow this, int cutoffTime) =>
+    while array.size(this.times) > 0 and array.get(this.times, 0) < cutoffTime
+        array.shift(this.times)
+        array.shift(this.values)
+    this
+
+method bands(PerWindow this, int currentTime, int lookbackMilliseconds, int minimumObservations, float sigma) =>
+    int observationCount = array.size(this.values)
+    float perMean = na
+    float perVariance = na
+
+    if observationCount > 0
+        float perTotal = 0.0
+        for index = 0 to observationCount - 1
+            perTotal += array.get(this.values, index)
+        perMean := perTotal / observationCount
+
+        if observationCount > 1
+            float squaredDifferenceSum = 0.0
+            for index = 0 to observationCount - 1
+                float difference = array.get(this.values, index) - perMean
+                squaredDifferenceSum += difference * difference
+            perVariance := squaredDifferenceSum / observationCount
+
+    float perDeviation = not na(perVariance) ? math.sqrt(perVariance) : na
+    bool fullCalendarWindow = not na(this.firstValidTime) and currentTime - this.firstValidTime >= lookbackMilliseconds
+    bool hasEnoughObservations = observationCount >= minimumObservations
+    bool hasValidDeviation = not na(perDeviation) and perDeviation > 0.0
+    bool modelReady = fullCalendarWindow and hasEnoughObservations and hasValidDeviation
+    float lowerBand = na
+    float upperBand = na
+
+    if modelReady
+        lowerBand := perMean - sigma * perDeviation
+        upperBand := perMean + sigma * perDeviation
+
+    [observationCount, perMean, fullCalendarWindow, modelReady, lowerBand, upperBand]
+
+method add(PerWindow this, float per, int observationTime) =>
+    if not na(per)
+        array.push(this.times, observationTime)
+        array.push(this.values, per)
+        if na(this.firstValidTime)
+            this.firstValidTime := observationTime
+    this
+
+f_tradeAction(
+     bool insidePeriod,
+     bool finalSession,
+     float positionSize,
+     bool epsValid,
+     bool modelReady,
+     float per,
+     float lowerBand,
+     float upperBand
+ ) =>
+    bool hasPosition = positionSize > 0.0
+    int action = ACTION_NONE
+
+    if insidePeriod
+        if finalSession and hasPosition
+            action := ACTION_EXIT_PERIOD_END
+        else if hasPosition and not epsValid
+            action := ACTION_EXIT_INVALID_EPS
+        else if hasPosition and modelReady and per >= upperBand
+            action := ACTION_EXIT_BAND
+        else if not finalSession and not hasPosition and epsValid and modelReady and per <= lowerBand
+            action := ACTION_ENTRY
+    action
+
+f_exitReason(int action, string epsStatus) =>
+    string exitReason = if action == ACTION_EXIT_PERIOD_END
+        "Fin del backtest"
+    else if action == ACTION_EXIT_INVALID_EPS
+        epsStatus
+    else
+        "PER sobre banda alta"
+    exitReason
+
+f_equityAtClose(int action, float currentEquity, float price, float positionSize) =>
+    bool entryOrder = action == ACTION_ENTRY
+    bool exitOrder = action >= ACTION_EXIT_BAND
+    float quantity = 0.0
+
+    if entryOrder
+        quantity := strategy.default_entry_qty(price)
+    else if exitOrder
+        quantity := math.abs(positionSize)
+
+    bool pendingOrder = entryOrder or exitOrder
+    float pendingCommission = pendingOrder ? quantity * price * syminfo.pointvalue * COMMISSION_RATE : 0.0
+    float equityAtClose = currentEquity - pendingCommission
+    equityAtClose
+
+method update(ReturnStats this, bool active, float equity) =>
+    if active
+        if not na(this.previousEquity) and this.previousEquity != 0.0
+            float dailyReturn = equity / this.previousEquity - 1.0
+            this.count += 1
+            float delta = dailyReturn - this.mean
+            this.mean += delta / this.count
+            this.m2 += delta * (dailyReturn - this.mean)
+        this.previousEquity := equity
+    this
+
+method sharpe(ReturnStats this, float annualRiskFreeRate) =>
+    float dailyRiskFreeRate = math.pow(1.0 + annualRiskFreeRate / 100.0, 1.0 / 252.0) - 1.0
+    float dailyDeviation = this.count > 1 ? math.sqrt(this.m2 / (this.count - 1)) : na
+    bool validDailyDeviation = not na(dailyDeviation) and dailyDeviation > 0.0
+    float annualizedSharpe = na
+
+    if validDailyDeviation
+        annualizedSharpe := (this.mean - dailyRiskFreeRate) / dailyDeviation * math.sqrt(252.0)
+
+    annualizedSharpe
+
+method update(DrawdownState this, bool active, float equity, int currentCloseTime) =>
+    if active
+        if na(this.peak)
+            this.peak := equity
+            this.peakTime := currentCloseTime
+        else if equity >= this.peak
+            if not na(this.startTime)
+                this.maximumDuration := math.max(this.maximumDuration, currentCloseTime - this.startTime)
+            this.peak := equity
+            this.peakTime := currentCloseTime
+            this.startTime := na
+        else
+            if na(this.startTime)
+                this.startTime := this.peakTime
+            this.maximumDuration := math.max(this.maximumDuration, currentCloseTime - this.startTime)
+    this
+
+f_modelStatus(bool epsValid, string epsStatus, bool fullCalendarWindow, int observationCount, int minimumObservations, bool modelReady) =>
+    string modelStatus = if not epsValid
+        epsStatus
+    else if not fullCalendarWindow
+        "Calentando ventana"
+    else if observationCount < minimumObservations
+        "Observaciones insuficientes"
+    else if not modelReady
+        "Desviación nula"
+    else
+        "Modelo listo"
+    modelStatus
+
+f_tableRow(table dashboard, int row, string label, string value, color valueColor, color valueBackground) =>
+    table.cell(dashboard, 0, row, label, text_color = chart.fg_color)
+    table.cell(dashboard, 1, row, value, text_color = valueColor, bgcolor = valueBackground)
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Fundamental events and point-in-time EPS state
+// Validación
+// ─────────────────────────────────────────────────────────────────────────────
+
+if barstate.isfirst and (not timeframe.isdaily or timeframe.multiplier != 1 or not chart.is_standard)
+    runtime.error("Esta estrategia requiere un gráfico estándar de 1 día (1D).")
+
+if barstate.isfirst and f_dateKey(startTimeInput) >= f_dateKey(endTimeInput)
+    runtime.error("La fecha de inicio debe ser anterior a la fecha final.")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. Estado fundamental conocido antes de la apertura
 // ─────────────────────────────────────────────────────────────────────────────
 
 float reportedEpsEvent = request.earnings(
@@ -129,140 +342,105 @@ float standardizedEpsEvent = request.earnings(
  )
 
 bool reportPublishedToday = not na(reportedEpsEvent)
-var array<float> quarterlyEps = array.new_float()
+var EpsHistory epsHistory = EpsHistory.new(array.new_float())
 
-// At this point the array contains only reports known before today's session.
-[epsTtmAtOpen, epsValidAtOpen] = f_ttmEps(quarterlyEps)
-float peAtOpen = epsValidAtOpen and open > 0.0 ? open / epsTtmAtOpen : na
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Rolling 365-calendar-day PER distribution, excluding today's observation
-// ─────────────────────────────────────────────────────────────────────────────
-
-int millisecondsPerDay = 24 * 60 * 60 * 1000
-int lookbackMilliseconds = lookbackDaysInput * millisecondsPerDay
-int windowStartTime = time - lookbackMilliseconds
-
-var array<int> peTimes = array.new_int()
-var array<float> peValues = array.new_float()
-var float peSum = 0.0
-var float peSquaredSum = 0.0
-var int firstValidPeTime = na
-
-while array.size(peTimes) > 0 and array.get(peTimes, 0) < windowStartTime
-    array.shift(peTimes)
-    float expiredPe = array.shift(peValues)
-    peSum -= expiredPe
-    peSquaredSum -= expiredPe * expiredPe
-
-int observationsBeforeOpen = array.size(peValues)
-float peMeanBeforeOpen = observationsBeforeOpen > 0 ? peSum / observationsBeforeOpen : na
-float peVarianceBeforeOpen = observationsBeforeOpen > 1 ? math.max(peSquaredSum / observationsBeforeOpen - peMeanBeforeOpen * peMeanBeforeOpen, 0.0) : na
-float peStdBeforeOpen = not na(peVarianceBeforeOpen) ? math.sqrt(peVarianceBeforeOpen) : na
-
-bool fullCalendarWindow = not na(firstValidPeTime) and time - firstValidPeTime >= lookbackMilliseconds
-bool modelReadyBeforeOpen = fullCalendarWindow and observationsBeforeOpen >= minObservationsInput and not na(peStdBeforeOpen) and peStdBeforeOpen > 0.0
-float lowerBandBeforeOpen = modelReadyBeforeOpen ? peMeanBeforeOpen - sigmaInput * peStdBeforeOpen : na
-float upperBandBeforeOpen = modelReadyBeforeOpen ? peMeanBeforeOpen + sigmaInput * peStdBeforeOpen : na
+[epsTtmAtOpen, epsValidAtOpen, epsStatusAtOpen] = epsHistory.ttm()
+float perAtOpen = epsValidAtOpen and open > 0.0 ? open / epsTtmAtOpen : na
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Signals use today's opening PER and yesterday's finalized distribution
+// 2. Bandas conocidas antes de la sesión actual
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool insideBacktestPeriod = time >= startTimeInput and time <= endTimeInput
-bool afterBacktestPeriod = time > endTimeInput
+int lookbackMilliseconds = lookbackDaysInput * MILLISECONDS_PER_DAY
+var PerWindow perWindow = PerWindow.new(array.new_int(), array.new_float())
 
-bool entrySignal = insideBacktestPeriod and strategy.position_size == 0 and epsValidAtOpen and modelReadyBeforeOpen and peAtOpen <= lowerBandBeforeOpen
-bool bandExitSignal = insideBacktestPeriod and strategy.position_size > 0 and epsValidAtOpen and modelReadyBeforeOpen and peAtOpen >= upperBandBeforeOpen
-bool invalidEpsExitSignal = insideBacktestPeriod and strategy.position_size > 0 and not epsValidAtOpen
-bool periodEndExitSignal = afterBacktestPeriod and strategy.position_size > 0
+perWindow.prune(time - lookbackMilliseconds)
+[observationCountBeforeOpen, perMeanBeforeOpen, fullCalendarWindowBeforeOpen, modelReadyBeforeOpen, lowerBandBeforeOpen, upperBandBeforeOpen] = perWindow.bands(
+     time,
+     lookbackMilliseconds,
+     minObservationsInput,
+     sigmaInput
+ )
 
-bool exitSignal = bandExitSignal or invalidEpsExitSignal or periodEndExitSignal
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Señal en la apertura y ejecución en el cierre
+// ─────────────────────────────────────────────────────────────────────────────
 
-if exitSignal
-    string exitComment = invalidEpsExitSignal ? "BPA TTM inválido" : periodEndExitSignal ? "Fin del backtest" : "PER sobre banda alta"
-    strategy.close("Long", comment = exitComment)
-else if entrySignal
+[insideBacktestPeriod, onFinalBacktestSession, finalBacktestSessionMissing] = f_periodState(time, time[1], startTimeInput, endTimeInput)
+
+if finalBacktestSessionMissing
+    runtime.error("La fecha final del backtest debe coincidir con una sesión bursátil.")
+
+int tradeAction = f_tradeAction(
+     insideBacktestPeriod,
+     onFinalBacktestSession,
+     strategy.position_size,
+     epsValidAtOpen,
+     modelReadyBeforeOpen,
+     perAtOpen,
+     lowerBandBeforeOpen,
+     upperBandBeforeOpen
+ )
+
+bool entrySignal = tradeAction == ACTION_ENTRY
+bool exitSignal = tradeAction >= ACTION_EXIT_BAND
+
+if entrySignal
     strategy.entry("Long", strategy.long, comment = "PER bajo banda baja")
+    log.info("Entrada | PER " + f_number(perAtOpen) + " | Banda " + f_number(lowerBandBeforeOpen) + " | Ejecución al cierre")
+else if exitSignal
+    string exitReason = f_exitReason(tradeAction, epsStatusAtOpen)
+    strategy.close("Long", comment = exitReason)
+    log.info("Salida | " + exitReason + " | PER " + f_number(perAtOpen) + " | Ejecución al cierre")
 
-// Add today's opening PER only after evaluating the signal, so it cannot affect
-// the threshold against which it is compared.
-if not na(peAtOpen)
-    array.push(peTimes, time)
-    array.push(peValues, peAtOpen)
-    peSum += peAtOpen
-    peSquaredSum += peAtOpen * peAtOpen
-    if na(firstValidPeTime)
-        firstValidPeTime := time
+if modelReadyBeforeOpen and not modelReadyBeforeOpen[1]
+    log.info("Modelo listo | " + str.tostring(observationCountBeforeOpen) + " aperturas válidas")
 
-// Incorporate a report only after processing today's opening signal. The new EPS
-// therefore becomes part of epsTtmAtOpen on the following trading session.
+if not epsValidAtOpen and epsValidAtOpen[1]
+    log.warning("BPA TTM inválido | " + epsStatusAtOpen)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Estado disponible para la sesión siguiente
+// ─────────────────────────────────────────────────────────────────────────────
+
+perWindow.add(perAtOpen, time)
+
 if reportPublishedToday
-    array.push(quarterlyEps, standardizedEpsEvent)
-    if array.size(quarterlyEps) > 4
-        array.shift(quarterlyEps)
+    epsHistory.add(standardizedEpsEvent)
 
-[epsTtmNextSession, epsValidNextSession] = f_ttmEps(quarterlyEps)
+[epsTtmNextSession, epsValidNextSession, epsStatusNextSession] = epsHistory.ttm()
+
+if reportPublishedToday
+    log.info(
+         "Resultados | BPA publicado " + f_number(reportedEpsEvent) +
+         " | BPA estandarizado " + f_number(standardizedEpsEvent) +
+         " | BPA TTM próxima sesión " + f_number(epsTtmNextSession)
+     )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Custom close-to-close drawdown duration and daily annualized Sharpe
+// 5. Métricas personalizadas
 // ─────────────────────────────────────────────────────────────────────────────
 
-var bool metricsStarted = false
-if not metricsStarted and insideBacktestPeriod and modelReadyBeforeOpen and epsValidAtOpen
-    metricsStarted := true
+float equityAtClose = f_equityAtClose(tradeAction, strategy.equity, close, strategy.position_size)
 
-bool metricsActive = metricsStarted and time <= endTimeInput
+var ReturnStats dailyReturns = ReturnStats.new()
+dailyReturns.update(insideBacktestPeriod, equityAtClose)
+float annualizedSharpe = dailyReturns.sharpe(riskFreeRateInput)
 
-var float previousEquity = na
-var int returnCount = 0
-var float meanDailyReturn = 0.0
-var float returnM2 = 0.0
+var DrawdownState drawdown = DrawdownState.new()
+drawdown.update(insideBacktestPeriod, equityAtClose, time_close)
 
-if metricsActive
-    if not na(previousEquity) and previousEquity != 0.0
-        float dailyReturn = strategy.equity / previousEquity - 1.0
-        returnCount += 1
-        float returnDelta = dailyReturn - meanDailyReturn
-        meanDailyReturn += returnDelta / returnCount
-        float returnDelta2 = dailyReturn - meanDailyReturn
-        returnM2 += returnDelta * returnDelta2
-    previousEquity := strategy.equity
-
-float dailyRiskFreeRate = math.pow(1.0 + riskFreeRateInput / 100.0, 1.0 / 252.0) - 1.0
-float dailyReturnStd = returnCount > 1 ? math.sqrt(returnM2 / (returnCount - 1)) : na
-float annualizedSharpe = not na(dailyReturnStd) and dailyReturnStd > 0.0 ? (meanDailyReturn - dailyRiskFreeRate) / dailyReturnStd * math.sqrt(252.0) : na
-
-var float equityPeak = na
-var int equityPeakTime = na
-var int drawdownStartTime = na
-var int maximumDrawdownDurationMs = 0
-
-if metricsActive
-    if na(equityPeak)
-        equityPeak := strategy.equity
-        equityPeakTime := time_close
-    else if strategy.equity >= equityPeak
-        if not na(drawdownStartTime)
-            maximumDrawdownDurationMs := math.max(maximumDrawdownDurationMs, time_close - drawdownStartTime)
-        equityPeak := strategy.equity
-        equityPeakTime := time_close
-        drawdownStartTime := na
-    else
-        if na(drawdownStartTime)
-            drawdownStartTime := equityPeakTime
-        maximumDrawdownDurationMs := math.max(maximumDrawdownDurationMs, time_close - drawdownStartTime)
-
-float maximumDrawdownDurationDays = maximumDrawdownDurationMs / float(millisecondsPerDay)
-float totalReturnPercent = (strategy.equity / strategy.initial_capital - 1.0) * 100.0
+float maximumDrawdownDurationDays = drawdown.maximumDuration / float(MILLISECONDS_PER_DAY)
+float totalReturnPercent = (equityAtClose / strategy.initial_capital - 1.0) * 100.0
 float maximumIntrabarDrawdownPercent = strategy.closedtrades + strategy.opentrades > 0 ? -math.abs(strategy.max_drawdown_percent) : na
+int totalTradesAtClose = strategy.closedtrades + strategy.opentrades + (entrySignal ? 1 : 0)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Visuals
+// Visualización
 // ─────────────────────────────────────────────────────────────────────────────
 
-plot(showBandsInput ? peAtOpen : na, "PER de apertura", color = color.white, linewidth = 2)
-plot(showBandsInput ? peMeanBeforeOpen : na, "Media previa", color = color.orange, linewidth = 2)
+plot(showBandsInput ? perAtOpen : na, "PER de apertura", color = color.white, linewidth = 2)
+plot(showBandsInput ? perMeanBeforeOpen : na, "Media previa", color = color.orange, linewidth = 2)
 lowerBandPlot = plot(showBandsInput ? lowerBandBeforeOpen : na, "Banda de compra", color = color.lime, linewidth = 2)
 upperBandPlot = plot(showBandsInput ? upperBandBeforeOpen : na, "Banda de venta", color = color.red, linewidth = 2)
 fill(lowerBandPlot, upperBandPlot, color = showBandsInput ? color.new(color.blue, 92) : na, title = "Canal del PER")
@@ -313,33 +491,29 @@ var table dashboard = table.new(
 
 if barstate.islast
     if showDashboardInput
-        string statusText = not epsValidNextSession ? "BPA TTM no válido" : not fullCalendarWindow ? "Calentando ventana" : observationsBeforeOpen < minObservationsInput ? "Observaciones insuficientes" : "Modelo listo"
+        string statusText = f_modelStatus(
+             epsValidNextSession,
+             epsStatusNextSession,
+             fullCalendarWindowBeforeOpen,
+             observationCountBeforeOpen,
+             minObservationsInput,
+             modelReadyBeforeOpen
+         )
         color statusColor = statusText == "Modelo listo" ? color.new(color.green, 25) : color.new(color.orange, 20)
         color returnColor = totalReturnPercent >= 0.0 ? color.new(color.green, 25) : color.new(color.red, 25)
 
         table.cell(dashboard, 0, 0, "Métrica", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
         table.cell(dashboard, 1, 0, syminfo.ticker, text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-        table.cell(dashboard, 0, 1, "Estado", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 1, statusText, text_color = chart.fg_color, bgcolor = statusColor)
-        table.cell(dashboard, 0, 2, "BPA TTM próximo", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 2, f_number(epsTtmNextSession), text_color = chart.fg_color)
-        table.cell(dashboard, 0, 3, "PER apertura", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 3, f_number(peAtOpen), text_color = chart.fg_color)
-        table.cell(dashboard, 0, 4, "Media 365d", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 4, f_number(peMeanBeforeOpen), text_color = chart.fg_color)
-        table.cell(dashboard, 0, 5, "Banda compra", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 5, f_number(lowerBandBeforeOpen), text_color = color.lime)
-        table.cell(dashboard, 0, 6, "Banda venta", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 6, f_number(upperBandBeforeOpen), text_color = color.red)
-        table.cell(dashboard, 0, 7, "Rentabilidad total", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 7, f_percent(totalReturnPercent), text_color = chart.fg_color, bgcolor = returnColor)
-        table.cell(dashboard, 0, 8, "Máx. drawdown", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 8, f_percent(maximumIntrabarDrawdownPercent), text_color = color.red)
-        table.cell(dashboard, 0, 9, "Máx. tiempo DD", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 9, f_number(maximumDrawdownDurationDays) + " días", text_color = chart.fg_color)
-        table.cell(dashboard, 0, 10, "Sharpe anualizado", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 10, f_number(annualizedSharpe), text_color = chart.fg_color)
-        table.cell(dashboard, 0, 11, "Operaciones cerradas", text_color = chart.fg_color)
-        table.cell(dashboard, 1, 11, str.tostring(strategy.closedtrades), text_color = chart.fg_color)
+        f_tableRow(dashboard, 1, "Estado", statusText, chart.fg_color, statusColor)
+        f_tableRow(dashboard, 2, "BPA TTM próximo", f_number(epsTtmNextSession), chart.fg_color, na)
+        f_tableRow(dashboard, 3, "PER apertura", f_number(perAtOpen), chart.fg_color, na)
+        f_tableRow(dashboard, 4, "Media 365d", f_number(perMeanBeforeOpen), chart.fg_color, na)
+        f_tableRow(dashboard, 5, "Banda compra", f_number(lowerBandBeforeOpen), color.lime, na)
+        f_tableRow(dashboard, 6, "Banda venta", f_number(upperBandBeforeOpen), color.red, na)
+        f_tableRow(dashboard, 7, "Rentabilidad total", f_percent(totalReturnPercent), chart.fg_color, returnColor)
+        f_tableRow(dashboard, 8, "Máx. drawdown", f_percent(maximumIntrabarDrawdownPercent), color.red, na)
+        f_tableRow(dashboard, 9, "Máx. tiempo DD", f_number(maximumDrawdownDurationDays) + " días", chart.fg_color, na)
+        f_tableRow(dashboard, 10, "Sharpe anualizado", f_number(annualizedSharpe), chart.fg_color, na)
+        f_tableRow(dashboard, 11, "Operaciones", str.tostring(totalTradesAtClose), chart.fg_color, na)
     else
         table.clear(dashboard, 0, 0, 1, 11)
