@@ -98,8 +98,8 @@ type PerWindow
 type ReturnStats
     float previousEquity = na
     int returnCount = 0
-    float meanReturn = 0.0
-    float sumSquaredReturnDifferences = 0.0
+    float meanDailyReturn = 0.0
+    float sumSquaredReturnDeviations = 0.0
 
 type DrawdownState
     float peakEquity = na
@@ -256,30 +256,31 @@ f_equityAtClose(int action, float currentEquity, float price, float positionSize
     float equityAtClose = currentEquity - pendingCommission
     equityAtClose
 
-method update(ReturnStats this, bool active, float equity) =>
-    if active
+method update(ReturnStats this, bool collectReturns, float equity) =>
+    if collectReturns
         if not na(this.previousEquity) and this.previousEquity != 0.0
             float dailyReturn = equity / this.previousEquity - 1.0
             this.returnCount += 1
-            float returnDelta = dailyReturn - this.meanReturn
-            this.meanReturn += returnDelta / this.returnCount
-            this.sumSquaredReturnDifferences += returnDelta * (dailyReturn - this.meanReturn)
+            float differenceFromPreviousMean = dailyReturn - this.meanDailyReturn
+            this.meanDailyReturn += differenceFromPreviousMean / this.returnCount
+            float differenceFromUpdatedMean = dailyReturn - this.meanDailyReturn
+            this.sumSquaredReturnDeviations += differenceFromPreviousMean * differenceFromUpdatedMean
         this.previousEquity := equity
     this
 
 method sharpe(ReturnStats this, float annualRiskFreeRate) =>
     float dailyRiskFreeRate = math.pow(1.0 + annualRiskFreeRate / 100.0, 1.0 / 252.0) - 1.0
-    float dailyDeviation = this.returnCount > 1 ? math.sqrt(this.sumSquaredReturnDifferences / (this.returnCount - 1)) : na
+    float dailyDeviation = this.returnCount > 1 ? math.sqrt(this.sumSquaredReturnDeviations / (this.returnCount - 1)) : na
     bool validDailyDeviation = not na(dailyDeviation) and dailyDeviation > 0.0
     float annualizedSharpe = na
 
     if validDailyDeviation
-        annualizedSharpe := (this.meanReturn - dailyRiskFreeRate) / dailyDeviation * math.sqrt(252.0)
+        annualizedSharpe := (this.meanDailyReturn - dailyRiskFreeRate) / dailyDeviation * math.sqrt(252.0)
 
     annualizedSharpe
 
-method update(DrawdownState this, bool active, float equity, int currentCloseTime) =>
-    if active
+method update(DrawdownState this, bool trackDrawdown, float equity, int currentCloseTime) =>
+    if trackDrawdown
         if na(this.peakEquity)
             this.peakEquity := equity
             this.peakEquityTime := currentCloseTime
@@ -439,7 +440,7 @@ int totalTradesAtClose = strategy.closedtrades + strategy.opentrades + (entrySig
 // Visualización
 // ─────────────────────────────────────────────────────────────────────────────
 
-plot(showBandsInput ? perAtOpen : na, "PER de apertura", color = color.white, linewidth = 2)
+plot(showBandsInput ? perAtOpen : na, "PER de apertura", color = color.blue, linewidth = 2)
 plot(showBandsInput ? perMeanBeforeOpen : na, "Media previa", color = color.orange, linewidth = 2)
 lowerBandPlot = plot(showBandsInput ? lowerBandBeforeOpen : na, "Banda de compra", color = color.lime, linewidth = 2)
 upperBandPlot = plot(showBandsInput ? upperBandBeforeOpen : na, "Banda de venta", color = color.red, linewidth = 2)
