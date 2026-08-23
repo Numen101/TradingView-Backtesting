@@ -31,3 +31,16 @@ bool finalBacktestSessionMissing = currentDate > endDate and
 ```
 
 Evitar devolver expresiones complejas directamente cuando un nombre permite entender qué representa cada elemento del resultado.
+
+## Nomenclatura descriptiva
+
+Usar nombres que permitan entender la responsabilidad y el significado de tipos, campos, variables, funciones y métodos sin tener que revisar su implementación.
+
+- Nombrar los tipos y clases con sustantivos que describan el estado o concepto que representan.
+- Nombrar las funciones y métodos según la acción o el resultado que producen.
+- Formular los booleanos como condiciones o estados reconocibles, por ejemplo `hasEnoughObservations` o `isModelReady`.
+- Incluir el dominio, el contexto temporal o la unidad de medida cuando sean relevantes, por ejemplo `perValues`, `equityAtClose` o `maximumDrawdownDurationMilliseconds`.
+- Mantener una nomenclatura base coherente entre los valores devueltos por una función y las variables que los reciben. El llamador puede añadir contexto, como `BeforeOpen` o `NextSession`.
+- Evitar nombres genéricos o abreviaturas poco evidentes, como `data`, `values`, `tmp` o `m2`, cuando exista una alternativa más precisa.
+
+Evitar también nombres innecesariamente largos o redundantes cuando el tipo o el ámbito reducido ya proporcionen suficiente contexto.
