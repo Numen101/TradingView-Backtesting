@@ -17,9 +17,11 @@ La señal se calculará con el PER de apertura y las bandas conocidas antes de c
 - TradingView confirma que `request.earnings()` asocia el valor al informe publicado, mientras que `request.financial()` adelanta el dato al comienzo del período fiscal siguiente. [Datos financieros en Pine](https://www.tradingview.com/support/solutions/43000564727-what-financial-data-is-available-in-pine/), [definición de Earnings](https://www.tradingview.com/support/solutions/43000629790-earnings/).
 - Calcular cada día:
   - `PER_apertura = open / BPA_TTM_conocido_antes_de_la_sesión`.
-  - Media y desviación estándar poblacional del PER punto-en-tiempo de los últimos 365 días naturales.
-  - Banda de compra: `media − 0,89σ`.
-  - Banda de venta: `media + 0,89σ`.
+  - Media del PER punto-en-tiempo de los últimos 365 días naturales para su visualización.
+  - Dividir los PER en bloques completos, consecutivos y no solapados de 20 observaciones, descartando el bloque final incompleto.
+  - Guardar el mínimo y el máximo de cada bloque en sus respectivas listas.
+  - Banda de compra: media del 10% más bajo de la lista de mínimos, redondeando hacia arriba el número de elementos y usando al menos uno.
+  - Banda de venta: media del 10% más alto de la lista de máximos, con el mismo redondeo.
 - Las bandas utilizadas en una apertura serán las calculadas al cierre anterior. El PER de la apertura actual se añadirá a la ventana después de evaluar la señal, evitando que la observación se incluya en su propio umbral.
 - No operar hasta disponer de una ventana completa y al menos 200 aperturas válidas.
 
@@ -37,7 +39,7 @@ La señal se calculará con el PER de apertura y las bandas conocidas antes de c
 - Si el PER queda inválido, cerrar la posición al cierre de la primera sesión que abra con ese estado y suspender las compras.
 - Configurar `process_orders_on_close = true` para que TradingView rellene las órdenes de mercado en el cierre de la vela que genera la operación. [Ejecución de órdenes en TradingView](https://www.tradingview.com/pine-script-docs/faq/strategies/#why-are-my-orders-executed-on-the-bar-following-my-triggers).
 - Los resultados publicados en una fecha solo modificarán el BPA utilizado desde la siguiente sesión bursátil, incluso si el informe se publicó antes de la apertura.
-- La fecha final debe coincidir con una sesión bursátil. No abrir nuevas posiciones ese día y liquidar cualquier posición existente en su cierre.
+- Si la fecha final configurada está dentro del histórico, debe coincidir con una sesión bursátil. Si supera la última vela completa del gráfico, usar esta última vela como fecha final efectiva. No abrir nuevas posiciones en la sesión final efectiva y liquidar cualquier posición existente en su cierre.
 - Sin piramidación, posiciones cortas, apalancamiento, órdenes límite ni stop-loss.
 - Aplicar un coste del 0,035% por compra o venta:
   - 2,5 bps de medio spread.
@@ -54,7 +56,6 @@ Crear:
 Inputs principales:
 
 - Ventana: 365 días naturales.
-- Multiplicador simétrico: 0,89σ.
 - Tasa libre de riesgo: 2%.
 - Fecha inicial y final del backtest.
 - Controles de visualización.
@@ -80,7 +81,8 @@ El Sharpe personalizado puede diferir del nativo porque TradingView calcula su m
 - Confirmar que la primera apertura que usa el nuevo BPA es la siguiente sesión bursátil.
 - Comprobar que la señal compara el PER de apertura actual con las bandas congeladas del cierre anterior.
 - Verificar que el precio de cada operación coincide con el cierre de la misma vela diaria que contiene la señal.
-- Validar manualmente BPA TTM, media, desviación y bandas en varias fechas.
+- Comprobar que una fecha final posterior al histórico liquida la posición en la última vela completa y nunca en una vela en formación.
+- Validar manualmente BPA TTM, media, extremos por bloque y bandas en varias fechas.
 - Comprobar la expulsión de observaciones con más de 365 días naturales.
 - Confirmar el coste de 0,035% en cada lado.
 - Confirmar que el dimensionamiento de la entrada no genera operaciones `Margin Call`.

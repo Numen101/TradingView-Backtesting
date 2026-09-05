@@ -26,10 +26,9 @@ No está diseñada para ETF, índices, criptomonedas ni activos sin resultados t
 
 ## Parámetros principales
 
-- **Ventana del PER:** número de días naturales usados para estimar su media y dispersión.
+- **Ventana del PER:** número de días naturales del historial usado para calcular las bandas.
 - **Mínimo de aperturas válidas:** observaciones exigidas antes de permitir operaciones.
-- **Distancia de las bandas:** separación de los niveles de compra y venta respecto a la media.
-- **Inicio y fin:** fechas inclusivas del backtest. La fecha final debe ser una sesión bursátil.
+- **Inicio y fin:** fechas inclusivas del backtest. Si la fecha final supera la última vela completa del gráfico, se utiliza esta última vela.
 - **Tasa libre de riesgo:** referencia utilizada para calcular el Sharpe diario personalizado.
 - **Visualización:** permite ocultar o mostrar bandas, publicaciones, señales, fondo de estado y tabla resumen.
 
@@ -47,6 +46,10 @@ El PER se considera inválido si todavía no existen cuatro informes compatibles
 
 Cada apertura se compara con la distribución de los PER observados durante los últimos 365 días naturales:
 
+- Los PER se dividen en bloques completos, consecutivos y no solapados de 20 observaciones; se descarta el bloque final incompleto.
+- De cada bloque se guarda su PER mínimo y su PER máximo.
+- La banda inferior es la media del 10% más bajo de los mínimos, redondeando hacia arriba el número de elementos.
+- La banda superior es la media del 10% más alto de los máximos, aplicando el mismo redondeo.
 - Se compra cuando el PER de apertura está en la banda inferior o por debajo.
 - Se vende cuando el PER de apertura está en la banda superior o por encima.
 - La observación actual no participa en las bandas contra las que se compara.
@@ -60,7 +63,7 @@ La señal utiliza información disponible en la apertura, pero la operación se 
 
 Se aplica un coste del 0,035% tanto en la compra como en la venta. El nominal reserva una pequeña parte del patrimonio para cubrir el coste de entrada sin utilizar apalancamiento.
 
-En la última sesión del período no se abren posiciones nuevas y cualquier posición existente se liquida al cierre.
+En la última sesión del período no se abren posiciones nuevas y cualquier posición existente se liquida al cierre. Si la fecha final configurada es posterior a la última vela completa disponible, esta vela se convierte en la sesión final efectiva; una vela en formación no se utiliza para liquidar la posición.
 
 ## Cómo interpretar los resultados
 
@@ -104,6 +107,6 @@ Los Pine Logs se limitan a los eventos importantes: disponibilidad del modelo, p
 1. Confirma que los marcadores de resultados coinciden con los eventos mostrados por TradingView.
 2. Verifica que un BPA nuevo empieza a afectar al PER en la sesión posterior.
 3. Revisa que las operaciones se ejecutan al cierre de la vela que contiene la señal.
-4. Comprueba que la fecha final corresponde a una sesión bursátil.
+4. Comprueba que la posición se liquida en la fecha final configurada o, si esta queda fuera del histórico completo, en la última vela completa del gráfico.
 5. Confirma en el informe que no existen liquidaciones por margen.
 6. Compara la rentabilidad y el drawdown del panel con el informe nativo.

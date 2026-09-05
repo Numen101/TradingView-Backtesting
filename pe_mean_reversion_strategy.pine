@@ -26,6 +26,8 @@ const string GROUP_METRICS = "Métricas"
 const string GROUP_VISUALS = "Visualización"
 
 const int MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
+const int PER_BLOCK_SIZE = 20
+const float PER_EXTREME_FRACTION = 0.10
 const float COMMISSION_RATE = 0.00035
 const int ACTION_NONE = 0
 const int ACTION_ENTRY = 1
@@ -39,7 +41,7 @@ int lookbackDaysInput = input.int(
      minval = 30,
      maxval = 3650,
      group = GROUP_MODEL,
-     tooltip = "Número de días naturales incluidos en la media y desviación del PER punto-en-tiempo."
+     tooltip = "Número de días naturales incluidos en la media y las bandas del PER punto-en-tiempo."
  )
 int minObservationsInput = input.int(
      200,
@@ -48,13 +50,6 @@ int minObservationsInput = input.int(
      maxval = 2500,
      group = GROUP_MODEL,
      tooltip = "La estrategia no opera hasta reunir este número de observaciones válidas."
- )
-float sigmaInput = input.float(
-     0.89,
-     "Distancia de las bandas (σ)",
-     minval = 0.01,
-     step = 0.01,
-     group = GROUP_MODEL
  )
 int startTimeInput = input.time(
      timestamp("01 Jan 2000 00:00 +0000"),
@@ -66,7 +61,7 @@ int endTimeInput = input.time(
      timestamp("31 Dec 2099 23:59 +0000"),
      "Fin",
      group = GROUP_PERIOD,
-     tooltip = "Fecha final inclusiva. Debe coincidir con una sesión bursátil."
+     tooltip = "Fecha final inclusiva. Si supera la última vela completa del gráfico, se usa esa vela como final del backtest."
  )
 float riskFreeRateInput = input.float(
      2.0,
@@ -168,10 +163,9 @@ method prune(PerWindow this, int cutoffTime) =>
         array.shift(this.perValues)
     this
 
-method bands(PerWindow this, int currentTime, int lookbackMilliseconds, int minimumObservations, float sigma) =>
+method bands(PerWindow this, int currentTime, int lookbackMilliseconds, int minimumObservations) =>
     int observationCount = array.size(this.perValues)
     float perMean = na
-    float perVariance = na
 
     if observationCount > 0
         float perTotal = 0.0
@@ -179,24 +173,45 @@ method bands(PerWindow this, int currentTime, int lookbackMilliseconds, int mini
             perTotal += array.get(this.perValues, index)
         perMean := perTotal / observationCount
 
-        if observationCount > 1
-            float squaredDifferenceSum = 0.0
-            for index = 0 to observationCount - 1
-                float difference = array.get(this.perValues, index) - perMean
-                squaredDifferenceSum += difference * difference
-            perVariance := squaredDifferenceSum / observationCount
+    int completeBlockCount = int(math.floor(observationCount / PER_BLOCK_SIZE))
+    array<float> minimumPerValues = array.new_float()
+    array<float> maximumPerValues = array.new_float()
 
-    float perDeviation = not na(perVariance) ? math.sqrt(perVariance) : na
+    if completeBlockCount > 0
+        for blockIndex = 0 to completeBlockCount - 1
+            int blockStartIndex = blockIndex * PER_BLOCK_SIZE
+            float blockMinimumPer = array.get(this.perValues, blockStartIndex)
+            float blockMaximumPer = blockMinimumPer
+
+            for blockOffset = 1 to PER_BLOCK_SIZE - 1
+                float blockPer = array.get(this.perValues, blockStartIndex + blockOffset)
+                blockMinimumPer := math.min(blockMinimumPer, blockPer)
+                blockMaximumPer := math.max(blockMaximumPer, blockPer)
+
+            array.push(minimumPerValues, blockMinimumPer)
+            array.push(maximumPerValues, blockMaximumPer)
+
+        array.sort(minimumPerValues, order.ascending)
+        array.sort(maximumPerValues, order.descending)
+
     bool fullCalendarWindow = not na(this.firstValidObservationTime) and currentTime - this.firstValidObservationTime >= lookbackMilliseconds
     bool hasEnoughObservations = observationCount >= minimumObservations
-    bool hasValidDeviation = not na(perDeviation) and perDeviation > 0.0
-    bool modelReady = fullCalendarWindow and hasEnoughObservations and hasValidDeviation
+    bool hasCompleteBlocks = completeBlockCount > 0
+    bool modelReady = fullCalendarWindow and hasEnoughObservations and hasCompleteBlocks
     float lowerBand = na
     float upperBand = na
 
     if modelReady
-        lowerBand := perMean - sigma * perDeviation
-        upperBand := perMean + sigma * perDeviation
+        int extremePerCount = math.max(1, int(math.ceil(completeBlockCount * PER_EXTREME_FRACTION)))
+        float minimumPerTotal = 0.0
+        float maximumPerTotal = 0.0
+
+        for index = 0 to extremePerCount - 1
+            minimumPerTotal += array.get(minimumPerValues, index)
+            maximumPerTotal += array.get(maximumPerValues, index)
+
+        lowerBand := minimumPerTotal / extremePerCount
+        upperBand := maximumPerTotal / extremePerCount
 
     [observationCount, perMean, fullCalendarWindow, modelReady, lowerBand, upperBand]
 
@@ -304,7 +319,7 @@ f_modelStatus(bool epsValid, string epsStatus, bool fullCalendarWindow, int obse
     else if observationCount < minimumObservations
         "Observaciones insuficientes"
     else if not modelReady
-        "Desviación nula"
+        "Bloques insuficientes"
     else
         "Modelo listo"
     modelStatus
@@ -359,15 +374,18 @@ perWindow.prune(time - lookbackMilliseconds)
 [observationCountBeforeOpen, perMeanBeforeOpen, fullCalendarWindowBeforeOpen, modelReadyBeforeOpen, lowerBandBeforeOpen, upperBandBeforeOpen] = perWindow.bands(
      time,
      lookbackMilliseconds,
-     minObservationsInput,
-     sigmaInput
+     minObservationsInput
  )
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Señal en la apertura y ejecución en el cierre
 // ─────────────────────────────────────────────────────────────────────────────
 
-[insideBacktestPeriod, onFinalBacktestSession, finalBacktestSessionMissing] = f_periodState(time, time[1], startTimeInput, endTimeInput)
+[insideBacktestPeriod, onInputFinalBacktestSession, finalBacktestSessionMissing] = f_periodState(time, time[1], startTimeInput, endTimeInput)
+
+bool onLastCompleteChartSession = barstate.islastconfirmedhistory
+bool inputEndAfterLastCompleteSession = onLastCompleteChartSession and f_dateKey(endTimeInput) > f_dateKey(time)
+bool onFinalBacktestSession = onInputFinalBacktestSession or inputEndAfterLastCompleteSession
 
 if finalBacktestSessionMissing
     runtime.error("La fecha final del backtest debe coincidir con una sesión bursátil.")
