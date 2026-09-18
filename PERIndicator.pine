@@ -1,0 +1,67 @@
+//@version=6
+indicator(
+     "PER",
+     shorttitle = "PER",
+     overlay = false,
+     format = format.price,
+     precision = 4
+ )
+
+// ────────────────────────────────────────────────────────────────────────────
+// Estado fundamental
+// ────────────────────────────────────────────────────────────────────────────
+
+type EpsHistory
+    array<float> standardizedEpsValues
+
+method ttm(EpsHistory this) =>
+    int reportCount = array.size(this.standardizedEpsValues)
+    bool complete = reportCount == 4
+    bool valuesAvailable = complete
+    float total = 0.0
+
+    if complete
+        for index = 0 to 3
+            float value = array.get(this.standardizedEpsValues, index)
+            valuesAvailable := valuesAvailable and not na(value)
+            total += na(value) ? 0.0 : value
+
+    bool epsValid = valuesAvailable and total > 0.0
+    float epsTtm = epsValid ? total : na
+    [epsTtm, epsValid]
+
+method add(EpsHistory this, float standardizedEps) =>
+    array.push(this.standardizedEpsValues, standardizedEps)
+    if array.size(this.standardizedEpsValues) > 4
+        array.shift(this.standardizedEpsValues)
+    this
+
+// ────────────────────────────────────────────────────────────────────────────
+// Cálculo del PER
+// ────────────────────────────────────────────────────────────────────────────
+
+float reportedEpsEvent = request.earnings(
+     syminfo.tickerid,
+     earnings.actual,
+     gaps = barmerge.gaps_on,
+     lookahead = barmerge.lookahead_off,
+     ignore_invalid_symbol = true
+ )
+float standardizedEpsEvent = request.earnings(
+     syminfo.tickerid,
+     earnings.standardized,
+     gaps = barmerge.gaps_on,
+     lookahead = barmerge.lookahead_off,
+     ignore_invalid_symbol = true
+ )
+
+bool reportPublished = not na(reportedEpsEvent)
+var EpsHistory epsHistory = EpsHistory.new(array.new_float())
+
+if reportPublished
+    epsHistory.add(standardizedEpsEvent)
+
+[epsTtm, epsValid] = epsHistory.ttm()
+float per = epsValid and close > 0.0 ? close / epsTtm : na
+
+plot(per, "PER", color = color.blue, linewidth = 2)
