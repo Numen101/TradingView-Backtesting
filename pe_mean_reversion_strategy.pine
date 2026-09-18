@@ -45,7 +45,7 @@ int minObservationsInput = input.int(
      tooltip = "La estrategia no compra hasta reunir este número de observaciones válidas dentro de los últimos tres años."
  )
 int activeDistanceLimitInput = input.int(
-     1,
+     4,
      "Límite usado por el Strategy Tester",
      options = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
      group = GROUP_MODEL,
