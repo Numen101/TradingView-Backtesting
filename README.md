@@ -1,6 +1,6 @@
-# Estrategia de reversión a la media del PER en TradingView
+# Estrategia de compra por distancia al PER mínimo
 
-Esta estrategia busca aprovechar desviaciones del PER de una empresa respecto a su comportamiento reciente. Utiliza precios diarios y únicamente resultados empresariales que ya habían sido publicados en cada fecha del backtest.
+Esta estrategia compra una empresa cuando su PER punto-en-tiempo está suficientemente cerca del PER mínimo observado durante los tres años naturales anteriores. Utiliza precios diarios y únicamente resultados empresariales que ya habían sido publicados en cada fecha del backtest.
 
 La especificación funcional completa se encuentra en [Plan.md](Plan.md).
 
@@ -18,71 +18,71 @@ No está diseñada para ETF, índices, criptomonedas ni activos sin resultados t
 1. Abre TradingView y carga el gráfico de una empresa, por ejemplo NASDAQ:MSFT.
 2. Selecciona un gráfico estándar con temporalidad **1D**.
 3. Abre la pestaña **Pine Editor**.
-4. Crea una estrategia nueva y sustituye su contenido por el de pe_mean_reversion_strategy.pine.
-5. Guarda el script.
-6. Pulsa **Añadir al gráfico**.
-7. Abre la configuración de la estrategia para elegir el período del backtest y revisar el resto de parámetros.
-8. Consulta las operaciones, la curva de patrimonio y las métricas en el informe de estrategia de TradingView.
+4. Crea una estrategia nueva y sustituye su contenido por el de `pe_mean_reversion_strategy.pine`.
+5. Guarda el script y pulsa **Añadir al gráfico**.
+6. Elige cuál de los diez límites debe usar el Strategy Tester y configura el período del backtest.
+7. Consulta el informe nativo para el límite activo y la tabla comparativa para los diez límites.
 
-## Parámetros principales
-
-- **Ventana del PER:** número de días naturales del historial usado para calcular las bandas.
-- **Mínimo de aperturas válidas:** observaciones exigidas antes de permitir operaciones.
-- **Inicio y fin:** fechas inclusivas del backtest. Si la fecha final supera la última vela completa del gráfico, se utiliza esta última vela.
-- **Tasa libre de riesgo:** referencia utilizada para calcular el Sharpe diario personalizado.
-- **Visualización:** permite ocultar o mostrar bandas, publicaciones, señales, fondo de estado y tabla resumen.
-
-El capital inicial, el tamaño de las posiciones y otras propiedades del emulador pueden revisarse desde la pestaña **Propiedades** de la estrategia.
-
-## Principios de la estrategia
-
-### Información punto-en-tiempo
+## Cálculo punto-en-tiempo
 
 El BPA TTM se forma con los cuatro últimos resultados trimestrales publicados. Un resultado nuevo no afecta a la apertura de su propia fecha de publicación: empieza a utilizarse en la siguiente sesión.
 
-El PER se considera inválido si todavía no existen cuatro informes compatibles, falta algún BPA o la suma de los cuatro BPA es cero o negativa. Mientras sea inválido no se abren posiciones y una posición existente se cierra.
+El PER de apertura se calcula como:
 
-### Reversión a la media
+`PER actual = apertura / BPA TTM conocido antes de la sesión`
 
-Cada apertura se compara con la distribución de los PER observados durante los últimos 365 días naturales:
+El PER se considera inválido si todavía no existen cuatro informes compatibles, falta algún BPA o la suma de los cuatro BPA es cero o negativa. Un PER inválido no puede generar una compra, pero tampoco provoca una venta después de entrar.
 
-- Los PER se dividen en bloques completos, consecutivos y no solapados de 20 observaciones; se descarta el bloque final incompleto.
-- De cada bloque se guarda su PER mínimo y su PER máximo.
-- La banda inferior es la media del 10% más bajo de los mínimos, redondeando hacia arriba el número de elementos.
-- La banda superior es la media del 10% más alto de los máximos, aplicando el mismo redondeo.
-- Se compra cuando el PER de apertura está en la banda inferior o por debajo.
-- Se vende cuando el PER de apertura está en la banda superior o por encima.
-- La observación actual no participa en las bandas contra las que se compara.
-- Antes de operar se exige una ventana temporal completa y un mínimo de 200 aperturas válidas.
+Antes de evaluar la señal de cada sesión, la estrategia conserva los PER válidos de los tres años naturales anteriores y obtiene su mínimo. La observación actual todavía no pertenece a esa ventana, por lo que nunca se compara consigo misma.
 
-La estrategia es exclusivamente compradora: no abre cortos, no piramida y no utiliza stop-loss ni órdenes límite.
+La distancia empleada es:
 
-## Ejecución simulada
+`d = ln(PER actual / PER mínimo de los tres años anteriores)`
 
-La señal utiliza información disponible en la apertura, pero la operación se simula al cierre de esa misma sesión. Esto representa una orden Market-on-Close preparada durante el día.
+Una distancia igual a cero indica que ambos PER coinciden. Una distancia negativa indica un nuevo mínimo respecto al historial disponible y una distancia positiva mide cuánto se ha separado el PER actual del mínimo en escala logarítmica.
 
-Se aplica un coste del 0,035% tanto en la compra como en la venta. El nominal reserva una pequeña parte del patrimonio para cubrir el coste de entrada sin utilizar apalancamiento.
+## Señal y ejecución
 
-En la última sesión del período no se abren posiciones nuevas y cualquier posición existente se liquida al cierre. Si la fecha final configurada es posterior a la última vela completa disponible, esta vela se convierte en la sesión final efectiva; una vela en formación no se utiliza para liquidar la posición.
+La estrategia compra si se cumplen simultáneamente estas condiciones:
 
-## Cómo interpretar los resultados
+- La fecha pertenece al período del backtest y no es su última sesión.
+- El BPA TTM y el PER son válidos.
+- Hay tres años naturales completos de historial.
+- La ventana contiene al menos el número configurado de aperturas válidas, 200 por defecto.
+- `d < límite`.
 
-El panel inferior muestra el PER de apertura, su media histórica y las bandas de compra y venta. Los marcadores E identifican fechas de publicación de resultados, y las etiquetas de compra y venta aparecen sobre el gráfico principal.
+La condición se evalúa en todas las sesiones. Mientras `d < límite`, la estrategia calcula el nominal adicional necesario para que el valor de la posición represente 1,6 veces el equity después de descontar la comisión de la nueva compra. Si el apalancamiento ya es igual o superior a 1,6×, no compra ni vende para reducirlo. Si posteriormente cae por debajo de 1,6× y la distancia continúa bajo el límite, vuelve a comprar para reajustarlo.
 
-La tabla resumen incluye:
+La señal utiliza datos conocidos en la apertura y cada compra se simula al cierre de esa sesión mediante `process_orders_on_close = true`.
 
-- Estado actual del modelo.
-- BPA TTM disponible para la próxima sesión.
-- PER, media y bandas.
-- Rentabilidad total.
-- Máximo drawdown.
-- Duración máxima del drawdown.
-- Sharpe anualizado.
-- Número de operaciones.
+Después de comprar, la estrategia mantiene la posición aunque cambie el BPA, el PER deje de ser válido o termine el período configurado. La única venta se ejecuta al cierre de la última vela completa disponible en el gráfico, para que TradingView registre una operación cerrada en el Strategy Tester.
 
-Los Pine Logs se limitan a los eventos importantes: disponibilidad del modelo, publicaciones de resultados, cambios a BPA inválido y órdenes de entrada o salida.
+Se aplica un coste del 0,035% a cada compra y a la venta final. El tamaño de cada orden incorpora su propia comisión al resolver el ajuste a 1,6×.
 
-## Supuestos del backtest
+La estrategia configura un margen de mantenimiento del 25%, equivalente a una capacidad máxima teórica de 4×, pero sus órdenes tienen como objetivo 1,6×. Este margen adicional reduce el riesgo de una liquidación inmediata; una pérdida suficientemente grande todavía puede provocar un `Margin Call` automático del emulador de TradingView.
+
+## Comparación de diez límites
+
+Los diez límites son editables. Sus valores iniciales son `0,00`, `0,02`, `0,04`, `0,06`, `0,08`, `0,10`, `0,12`, `0,14`, `0,16` y `0,18`.
+
+El input **Límite usado por el Strategy Tester** decide cuál genera las órdenes nativas. La tabla inferior derecha evalúa simultáneamente los diez límites como carteras apalancadas independientes y muestra:
+
+- El límite evaluado.
+- El número de compras efectuadas.
+- La fecha de su primera compra.
+- La rentabilidad hasta la última vela completa del gráfico, incluyendo todas las comisiones de compra y la comisión de venta.
+
+La fila resaltada corresponde al límite activo del Strategy Tester. Si un límite no llega a generar señal, la tabla muestra **Sin compra**.
+
+## Paneles y métricas
+
+El panel inferior representa la distancia logarítmica, el límite activo y el nivel cero. El PER actual y su mínimo histórico también están disponibles en la ventana de datos.
+
+La tabla superior derecha resume el estado del modelo, BPA TTM, PER, mínimo histórico, distancia, límite activo, apalancamiento objetivo, rentabilidad, máximo drawdown, duración máxima del drawdown, Sharpe anualizado y número de compras para la estrategia nativa.
+
+El informe nativo y la tabla comparativa tienen responsabilidades distintas: el informe muestra un único límite seleccionado; la tabla calcula los diez escenarios a la vez. Ambos valoran la posición en la última vela completa disponible en el gráfico.
+
+## Supuestos y limitaciones
 
 - Los datos diarios y fundamentales proporcionados por TradingView son correctos.
 - La fecha asociada a un resultado representa su fecha de publicación.
@@ -90,23 +90,22 @@ Los Pine Logs se limitan a los eventos importantes: disponibilidad del modelo, p
 - Las señales conocidas durante la sesión pueden prepararse para una ejecución Market-on-Close.
 - El precio de cierre de la vela es el precio de ejecución empleado por el emulador.
 - Los costes son constantes y no dependen de liquidez, tamaño o volatilidad.
-- El Sharpe personalizado utiliza retornos diarios y 252 sesiones anuales.
-
-## Limitaciones
-
 - TradingView puede corregir retrospectivamente datos fundamentales; Pine no permite auditar todas sus versiones históricas.
 - La disponibilidad y calidad del BPA varía entre empresas y mercados.
-- El gráfico diario no permite distinguir con precisión publicaciones anteriores o posteriores a la apertura.
-- Una ejecución real enviada al terminar la sesión puede no conseguir el mismo precio de cierre que el emulador.
 - No se modelan impuestos, impacto de mercado, deslizamiento variable, dividendos ni restricciones específicas de cada bróker.
-- El resultado depende de los parámetros, del período elegido y del universo analizado.
+- La comparación de diez límites usa la comisión definida en el código; si se sobrescribe desde las propiedades del Strategy Tester, su fila activa puede dejar de coincidir exactamente con la simulación personalizada.
+- La simulación personalizada no reproduce los `Margin Call` automáticos de TradingView ni posibles redondeos de cantidades negociables, por lo que puede diferir del Strategy Tester tras movimientos extremos.
+- Cada escenario puede realizar múltiples compras, pero solo genera una venta voluntaria en la última vela completa.
 - Un backtest favorable no garantiza resultados futuros.
 
-## Comprobaciones antes de usar los resultados
+## Comprobaciones recomendadas
 
 1. Confirma que los marcadores de resultados coinciden con los eventos mostrados por TradingView.
 2. Verifica que un BPA nuevo empieza a afectar al PER en la sesión posterior.
-3. Revisa que las operaciones se ejecutan al cierre de la vela que contiene la señal.
-4. Comprueba que la posición se liquida en la fecha final configurada o, si esta queda fuera del histórico completo, en la última vela completa del gráfico.
-5. Confirma en el informe que no existen liquidaciones por margen.
-6. Compara la rentabilidad y el drawdown del panel con el informe nativo.
+3. Comprueba que el PER mínimo solo contiene observaciones de los tres años anteriores y excluye la apertura actual.
+4. Valida manualmente varias distancias con `ln(PER actual / PER mínimo)`.
+5. Comprueba que no hay compras antes de completar tres años y el mínimo de observaciones.
+6. Verifica que cada límite solo compra cuando la distancia es estrictamente menor y el apalancamiento está por debajo de 1,6×.
+7. Confirma que la única orden de venta se genera en la última vela completa del gráfico.
+8. Comprueba después de cada compra que `valor de la posición / equity` queda aproximadamente en 1,6.
+9. Compara la fila del límite activo con el número de compras y la rentabilidad mostrados por el Strategy Tester, teniendo en cuenta las limitaciones descritas arriba.
