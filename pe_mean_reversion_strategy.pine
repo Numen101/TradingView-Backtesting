@@ -1,17 +1,17 @@
 //@version=6
 strategy(
-     "Reversión a la media del PER punto-en-tiempo",
-     shorttitle = "PER Mean Reversion",
+     "Compra por distancia al PER mínimo histórico",
+     shorttitle = "PER Distance Buy",
      overlay = false,
      initial_capital = 100000,
-     default_qty_type = strategy.percent_of_equity,
-     default_qty_value = 99.965,
-     pyramiding = 0,
+     default_qty_type = strategy.fixed,
+     default_qty_value = 1,
+     pyramiding = 100,
      commission_type = strategy.commission.percent,
      commission_value = 0.035,
      slippage = 0,
      process_orders_on_close = true,
-     margin_long = 100,
+     margin_long = 25,
      margin_short = 100,
      risk_free_rate = 2.0
  )
@@ -21,36 +21,45 @@ strategy(
 // ─────────────────────────────────────────────────────────────────────────────
 
 const string GROUP_MODEL = "Modelo"
+const string GROUP_LIMITS = "Límites de distancia"
 const string GROUP_PERIOD = "Período del backtest"
 const string GROUP_METRICS = "Métricas"
 const string GROUP_VISUALS = "Visualización"
 
 const int MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
-const int PER_BLOCK_SIZE = 20
-const float PER_EXTREME_FRACTION = 0.10
+const int HISTORICAL_YEARS = 3
+const int DISTANCE_LIMIT_COUNT = 10
 const float COMMISSION_RATE = 0.00035
-const int ACTION_NONE = 0
-const int ACTION_ENTRY = 1
-const int ACTION_EXIT_BAND = 2
-const int ACTION_EXIT_INVALID_EPS = 3
-const int ACTION_EXIT_PERIOD_END = 4
+const float MIN_PURCHASE_EQUITY_FRACTION = 0.000001
+const float TARGET_LEVERAGE = 1.6
 
-int lookbackDaysInput = input.int(
-     365,
-     "Ventana del PER (días naturales)",
-     minval = 30,
-     maxval = 3650,
-     group = GROUP_MODEL,
-     tooltip = "Número de días naturales incluidos en la media y las bandas del PER punto-en-tiempo."
- )
 int minObservationsInput = input.int(
      200,
      "Mínimo de aperturas válidas",
      minval = 2,
      maxval = 2500,
      group = GROUP_MODEL,
-     tooltip = "La estrategia no opera hasta reunir este número de observaciones válidas."
+     tooltip = "La estrategia no compra hasta reunir este número de observaciones válidas dentro de los últimos tres años."
  )
+int activeDistanceLimitInput = input.int(
+     1,
+     "Límite usado por el Strategy Tester",
+     options = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+     group = GROUP_MODEL,
+     tooltip = "Selecciona cuál de los diez límites genera la orden nativa mostrada por el Strategy Tester."
+ )
+
+float distanceLimit1Input = input.float(0.00, "Límite 1", step = 0.01, group = GROUP_LIMITS, inline = "limits1")
+float distanceLimit2Input = input.float(0.02, "Límite 2", step = 0.01, group = GROUP_LIMITS, inline = "limits1")
+float distanceLimit3Input = input.float(0.04, "Límite 3", step = 0.01, group = GROUP_LIMITS, inline = "limits2")
+float distanceLimit4Input = input.float(0.06, "Límite 4", step = 0.01, group = GROUP_LIMITS, inline = "limits2")
+float distanceLimit5Input = input.float(0.08, "Límite 5", step = 0.01, group = GROUP_LIMITS, inline = "limits3")
+float distanceLimit6Input = input.float(0.10, "Límite 6", step = 0.01, group = GROUP_LIMITS, inline = "limits3")
+float distanceLimit7Input = input.float(0.12, "Límite 7", step = 0.01, group = GROUP_LIMITS, inline = "limits4")
+float distanceLimit8Input = input.float(0.14, "Límite 8", step = 0.01, group = GROUP_LIMITS, inline = "limits4")
+float distanceLimit9Input = input.float(0.16, "Límite 9", step = 0.01, group = GROUP_LIMITS, inline = "limits5")
+float distanceLimit10Input = input.float(0.18, "Límite 10", step = 0.01, group = GROUP_LIMITS, inline = "limits5")
+
 int startTimeInput = input.time(
      timestamp("01 Jan 2000 00:00 +0000"),
      "Inicio",
@@ -61,7 +70,7 @@ int endTimeInput = input.time(
      timestamp("31 Dec 2099 23:59 +0000"),
      "Fin",
      group = GROUP_PERIOD,
-     tooltip = "Fecha final inclusiva. Si supera la última vela completa del gráfico, se usa esa vela como final del backtest."
+     tooltip = "Fecha final inclusiva. Si supera la última vela completa del gráfico, se usa esa vela para valorar la posición."
  )
 float riskFreeRateInput = input.float(
      2.0,
@@ -69,14 +78,15 @@ float riskFreeRateInput = input.float(
      minval = -99.0,
      step = 0.1,
      group = GROUP_METRICS,
-     tooltip = "Se usa en el Sharpe diario personalizado."
+     tooltip = "Se usa en el Sharpe diario personalizado del límite activo."
  )
 
-bool showBandsInput = input.bool(true, "Mostrar PER y bandas", group = GROUP_VISUALS)
+bool showDistanceInput = input.bool(true, "Mostrar distancia y límite activo", group = GROUP_VISUALS)
 bool showEarningsInput = input.bool(true, "Marcar publicaciones", group = GROUP_VISUALS)
-bool showSignalsInput = input.bool(true, "Marcar señales en el precio", group = GROUP_VISUALS)
+bool showSignalsInput = input.bool(true, "Marcar señal de compra", group = GROUP_VISUALS)
 bool showInvalidBackgroundInput = input.bool(true, "Sombrear PER inválido", group = GROUP_VISUALS)
 bool showDashboardInput = input.bool(true, "Mostrar resumen", group = GROUP_VISUALS)
+bool showComparisonInput = input.bool(true, "Mostrar comparación de límites", group = GROUP_VISUALS)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Estados encapsulados
@@ -107,7 +117,7 @@ type DrawdownState
 // ─────────────────────────────────────────────────────────────────────────────
 
 f_number(float value) =>
-    na(value) ? "n/d" : str.tostring(value, "#.##")
+    na(value) ? "n/d" : str.tostring(value, "#.####")
 
 f_percent(float value) =>
     na(value) ? "n/d" : str.tostring(value, "#.##") + "%"
@@ -116,6 +126,19 @@ f_dateKey(int timestampValue) =>
     year(timestampValue, syminfo.timezone) * 10000 +
      month(timestampValue, syminfo.timezone) * 100 +
      dayofmonth(timestampValue, syminfo.timezone)
+
+f_dateText(int timestampValue) =>
+    na(timestampValue) ? "Sin compra" : str.tostring(f_dateKey(timestampValue))
+
+f_threeYearsEarlier(int timestampValue) =>
+    timestamp(
+         syminfo.timezone,
+         year(timestampValue, syminfo.timezone) - HISTORICAL_YEARS,
+         month(timestampValue, syminfo.timezone),
+         dayofmonth(timestampValue, syminfo.timezone),
+         0,
+         0
+     )
 
 f_periodState(int currentTime, int previousTime, int startTime, int endTime) =>
     int currentDate = f_dateKey(currentTime)
@@ -163,57 +186,22 @@ method prune(PerWindow this, int cutoffTime) =>
         array.shift(this.perValues)
     this
 
-method bands(PerWindow this, int currentTime, int lookbackMilliseconds, int minimumObservations) =>
+method statistics(PerWindow this, int currentTime, int minimumObservations) =>
     int observationCount = array.size(this.perValues)
-    float perMean = na
+    float minimumPer = na
 
     if observationCount > 0
-        float perTotal = 0.0
-        for index = 0 to observationCount - 1
-            perTotal += array.get(this.perValues, index)
-        perMean := perTotal / observationCount
+        minimumPer := array.get(this.perValues, 0)
+        if observationCount > 1
+            for index = 1 to observationCount - 1
+                minimumPer := math.min(minimumPer, array.get(this.perValues, index))
 
-    int completeBlockCount = int(math.floor(observationCount / PER_BLOCK_SIZE))
-    array<float> minimumPerValues = array.new_float()
-    array<float> maximumPerValues = array.new_float()
-
-    if completeBlockCount > 0
-        for blockIndex = 0 to completeBlockCount - 1
-            int blockStartIndex = blockIndex * PER_BLOCK_SIZE
-            float blockMinimumPer = array.get(this.perValues, blockStartIndex)
-            float blockMaximumPer = blockMinimumPer
-
-            for blockOffset = 1 to PER_BLOCK_SIZE - 1
-                float blockPer = array.get(this.perValues, blockStartIndex + blockOffset)
-                blockMinimumPer := math.min(blockMinimumPer, blockPer)
-                blockMaximumPer := math.max(blockMaximumPer, blockPer)
-
-            array.push(minimumPerValues, blockMinimumPer)
-            array.push(maximumPerValues, blockMaximumPer)
-
-        array.sort(minimumPerValues, order.ascending)
-        array.sort(maximumPerValues, order.descending)
-
-    bool fullCalendarWindow = not na(this.firstValidObservationTime) and currentTime - this.firstValidObservationTime >= lookbackMilliseconds
+    int windowStartTime = f_threeYearsEarlier(currentTime)
+    bool fullCalendarWindow = not na(this.firstValidObservationTime) and
+         f_dateKey(this.firstValidObservationTime) <= f_dateKey(windowStartTime)
     bool hasEnoughObservations = observationCount >= minimumObservations
-    bool hasCompleteBlocks = completeBlockCount > 0
-    bool modelReady = fullCalendarWindow and hasEnoughObservations and hasCompleteBlocks
-    float lowerBand = na
-    float upperBand = na
-
-    if modelReady
-        int extremePerCount = math.max(1, int(math.ceil(completeBlockCount * PER_EXTREME_FRACTION)))
-        float minimumPerTotal = 0.0
-        float maximumPerTotal = 0.0
-
-        for index = 0 to extremePerCount - 1
-            minimumPerTotal += array.get(minimumPerValues, index)
-            maximumPerTotal += array.get(maximumPerValues, index)
-
-        lowerBand := minimumPerTotal / extremePerCount
-        upperBand := maximumPerTotal / extremePerCount
-
-    [observationCount, perMean, fullCalendarWindow, modelReady, lowerBand, upperBand]
+    bool modelReady = fullCalendarWindow and hasEnoughObservations and not na(minimumPer)
+    [observationCount, minimumPer, fullCalendarWindow, modelReady]
 
 method add(PerWindow this, float per, int observationTime) =>
     if not na(per)
@@ -223,50 +211,35 @@ method add(PerWindow this, float per, int observationTime) =>
             this.firstValidObservationTime := observationTime
     this
 
-f_tradeAction(
-     bool insidePeriod,
-     bool finalSession,
-     float positionSize,
-     bool epsValid,
-     bool modelReady,
-     float per,
-     float lowerBand,
-     float upperBand
- ) =>
-    bool hasPosition = positionSize > 0.0
-    int action = ACTION_NONE
+f_perDistance(float currentPer, float minimumPer) =>
+    bool validRatio = not na(currentPer) and not na(minimumPer) and currentPer > 0.0 and minimumPer > 0.0
+    float perDistance = validRatio ? math.log(currentPer / minimumPer) : na
+    perDistance
 
-    if insidePeriod
-        if finalSession and hasPosition
-            action := ACTION_EXIT_PERIOD_END
-        else if hasPosition and not epsValid
-            action := ACTION_EXIT_INVALID_EPS
-        else if hasPosition and modelReady and per >= upperBand
-            action := ACTION_EXIT_BAND
-        else if not finalSession and not hasPosition and epsValid and modelReady and per <= lowerBand
-            action := ACTION_ENTRY
-    action
+f_belowDistanceLimit(float perDistance, bool modelReady, float distanceLimit) =>
+    bool belowDistanceLimit = not na(perDistance) and perDistance < distanceLimit
+    bool purchaseCondition = modelReady and belowDistanceLimit
+    purchaseCondition
 
-f_exitReason(int action, string epsStatus) =>
-    string exitReason = if action == ACTION_EXIT_PERIOD_END
-        "Fin del backtest"
-    else if action == ACTION_EXIT_INVALID_EPS
-        epsStatus
-    else
-        "PER sobre banda alta"
-    exitReason
+f_purchaseNotional(float currentEquity, float currentPositionValue) =>
+    float targetPositionValue = math.max(currentEquity, 0.0) * TARGET_LEVERAGE
+    float notionalGap = targetPositionValue - currentPositionValue
+    float purchaseNotional = math.max(0.0, notionalGap / (1.0 + TARGET_LEVERAGE * COMMISSION_RATE))
+    purchaseNotional
 
-f_equityAtClose(int action, float currentEquity, float price, float positionSize) =>
-    bool entryOrder = action == ACTION_ENTRY
-    bool exitOrder = action >= ACTION_EXIT_BAND
+f_leverage(float positionValue, float equity) =>
+    float leverage = equity > 0.0 ? positionValue / equity : na
+    leverage
+
+f_equityAtClose(bool purchaseSignal, bool exitSignal, float currentEquity, float price, float positionSize, float purchaseQuantity) =>
     float quantity = 0.0
 
-    if entryOrder
-        quantity := strategy.default_entry_qty(price)
-    else if exitOrder
+    if purchaseSignal
+        quantity := purchaseQuantity
+    else if exitSignal
         quantity := math.abs(positionSize)
 
-    bool pendingOrder = entryOrder or exitOrder
+    bool pendingOrder = purchaseSignal or exitSignal
     float pendingCommission = pendingOrder ? quantity * price * syminfo.pointvalue * COMMISSION_RATE : 0.0
     float equityAtClose = currentEquity - pendingCommission
     equityAtClose
@@ -315,11 +288,11 @@ f_modelStatus(bool epsValid, string epsStatus, bool fullCalendarWindow, int obse
     string modelStatus = if not epsValid
         epsStatus
     else if not fullCalendarWindow
-        "Calentando ventana"
+        "Calentando ventana de 3 años"
     else if observationCount < minimumObservations
         "Observaciones insuficientes"
     else if not modelReady
-        "Bloques insuficientes"
+        "Mínimo no disponible"
     else
         "Modelo listo"
     modelStatus
@@ -364,18 +337,32 @@ var EpsHistory epsHistory = EpsHistory.new(array.new_float())
 float perAtOpen = epsValidAtOpen and open > 0.0 ? open / epsTtmAtOpen : na
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Bandas conocidas antes de la sesión actual
+// 2. Mínimo histórico conocido antes de la sesión actual
 // ─────────────────────────────────────────────────────────────────────────────
 
-int lookbackMilliseconds = lookbackDaysInput * MILLISECONDS_PER_DAY
 var PerWindow perWindow = PerWindow.new(array.new_int(), array.new_float())
+int historicalWindowStartTime = f_threeYearsEarlier(time)
 
-perWindow.prune(time - lookbackMilliseconds)
-[observationCountBeforeOpen, perMeanBeforeOpen, fullCalendarWindowBeforeOpen, modelReadyBeforeOpen, lowerBandBeforeOpen, upperBandBeforeOpen] = perWindow.bands(
+perWindow.prune(historicalWindowStartTime)
+[observationCountBeforeOpen, minimumPerBeforeOpen, fullCalendarWindowBeforeOpen, modelReadyBeforeOpen] = perWindow.statistics(
      time,
-     lookbackMilliseconds,
      minObservationsInput
  )
+float perDistanceAtOpen = f_perDistance(perAtOpen, minimumPerBeforeOpen)
+
+var array<float> distanceLimits = array.from(
+     distanceLimit1Input,
+     distanceLimit2Input,
+     distanceLimit3Input,
+     distanceLimit4Input,
+     distanceLimit5Input,
+     distanceLimit6Input,
+     distanceLimit7Input,
+     distanceLimit8Input,
+     distanceLimit9Input,
+     distanceLimit10Input
+ )
+float activeDistanceLimit = array.get(distanceLimits, activeDistanceLimitInput - 1)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Señal en la apertura y ejecución en el cierre
@@ -390,27 +377,32 @@ bool onFinalBacktestSession = onInputFinalBacktestSession or inputEndAfterLastCo
 if finalBacktestSessionMissing
     runtime.error("La fecha final del backtest debe coincidir con una sesión bursátil.")
 
-int tradeAction = f_tradeAction(
-     insideBacktestPeriod,
-     onFinalBacktestSession,
-     strategy.position_size,
-     epsValidAtOpen,
-     modelReadyBeforeOpen,
-     perAtOpen,
-     lowerBandBeforeOpen,
-     upperBandBeforeOpen
- )
+bool belowActiveDistanceLimit = f_belowDistanceLimit(perDistanceAtOpen, modelReadyBeforeOpen, activeDistanceLimit)
+bool eligibleForPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and belowActiveDistanceLimit
+float currentPositionValue = math.abs(strategy.position_size) * close * syminfo.pointvalue
+float purchaseNotional = eligibleForPurchase ? f_purchaseNotional(strategy.equity, currentPositionValue) : 0.0
+float purchaseQuantity = close > 0.0 and syminfo.pointvalue > 0.0 ? purchaseNotional / (close * syminfo.pointvalue) : 0.0
+float minimumPurchaseNotional = math.max(strategy.equity, 0.0) * MIN_PURCHASE_EQUITY_FRACTION
+bool purchaseSignal = eligibleForPurchase and purchaseNotional > minimumPurchaseNotional and purchaseQuantity > 0.0
+bool exitSignal = onLastCompleteChartSession and strategy.position_size > 0.0
 
-bool entrySignal = tradeAction == ACTION_ENTRY
-bool exitSignal = tradeAction >= ACTION_EXIT_BAND
-
-if entrySignal
-    strategy.entry("Long", strategy.long, comment = "PER bajo banda baja")
-    log.info("Entrada | PER " + f_number(perAtOpen) + " | Banda " + f_number(lowerBandBeforeOpen) + " | Ejecución al cierre")
+if purchaseSignal
+    strategy.order("Long", strategy.long, qty = purchaseQuantity, comment = "Ajuste a apalancamiento 1,6x")
+    float equityAfterCommission = strategy.equity - purchaseNotional * COMMISSION_RATE
+    float positionValueAfterPurchase = currentPositionValue + purchaseNotional
+    float leverageAfterPurchase = f_leverage(positionValueAfterPurchase, equityAfterCommission)
+    log.info(
+         "Compra | PER " + f_number(perAtOpen) +
+         " | Mínimo 3a " + f_number(minimumPerBeforeOpen) +
+         " | Distancia " + f_number(perDistanceAtOpen) +
+         " | Límite " + f_number(activeDistanceLimit) +
+         " | Nominal " + f_number(purchaseNotional) +
+         " | Apalancamiento " + f_number(leverageAfterPurchase) + "x" +
+         " | Ejecución al cierre"
+     )
 else if exitSignal
-    string exitReason = f_exitReason(tradeAction, epsStatusAtOpen)
-    strategy.close("Long", comment = exitReason)
-    log.info("Salida | " + exitReason + " | PER " + f_number(perAtOpen) + " | Ejecución al cierre")
+    strategy.close_all(comment = "Última vela completa del gráfico")
+    log.info("Venta | Última vela completa del gráfico | Ejecución al cierre")
 
 if modelReadyBeforeOpen and not modelReadyBeforeOpen[1]
     log.info("Modelo listo | " + str.tostring(observationCountBeforeOpen) + " aperturas válidas")
@@ -419,7 +411,52 @@ if not epsValidAtOpen and epsValidAtOpen[1]
     log.warning("BPA TTM inválido | " + epsStatusAtOpen)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Estado disponible para la sesión siguiente
+// 4. Comparación simultánea de los diez límites
+// ─────────────────────────────────────────────────────────────────────────────
+
+var array<float> evaluationCashBalances = array.new_float(DISTANCE_LIMIT_COUNT, strategy.initial_capital)
+var array<float> evaluationPositionQuantities = array.new_float(DISTANCE_LIMIT_COUNT, 0.0)
+var array<int> evaluationFirstPurchaseTimes = array.new_int(DISTANCE_LIMIT_COUNT, na)
+var array<int> evaluationPurchaseCounts = array.new_int(DISTANCE_LIMIT_COUNT, 0)
+var array<float> evaluationFinalEquities = array.new_float(DISTANCE_LIMIT_COUNT, na)
+
+bool eligibleForEvaluationPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and modelReadyBeforeOpen and not na(perDistanceAtOpen)
+
+if eligibleForEvaluationPurchase
+    for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
+        float distanceLimit = array.get(distanceLimits, limitIndex)
+        bool belowEvaluationDistanceLimit = perDistanceAtOpen < distanceLimit
+
+        if belowEvaluationDistanceLimit
+            float cashBalance = array.get(evaluationCashBalances, limitIndex)
+            float positionQuantity = array.get(evaluationPositionQuantities, limitIndex)
+            float positionValue = positionQuantity * close * syminfo.pointvalue
+            float currentEquity = cashBalance + positionValue
+            float additionalNotional = f_purchaseNotional(currentEquity, positionValue)
+            float additionalQuantity = close > 0.0 and syminfo.pointvalue > 0.0 ? additionalNotional / (close * syminfo.pointvalue) : 0.0
+            float minimumAdditionalNotional = math.max(currentEquity, 0.0) * MIN_PURCHASE_EQUITY_FRACTION
+
+            if additionalNotional > minimumAdditionalNotional and additionalQuantity > 0.0
+                int purchaseCount = array.get(evaluationPurchaseCounts, limitIndex)
+                array.set(evaluationCashBalances, limitIndex, cashBalance - additionalNotional * (1.0 + COMMISSION_RATE))
+                array.set(evaluationPositionQuantities, limitIndex, positionQuantity + additionalQuantity)
+                array.set(evaluationPurchaseCounts, limitIndex, purchaseCount + 1)
+                if purchaseCount == 0
+                    array.set(evaluationFirstPurchaseTimes, limitIndex, time_close)
+
+if onLastCompleteChartSession
+    for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
+        float cashBalance = array.get(evaluationCashBalances, limitIndex)
+        float positionQuantity = array.get(evaluationPositionQuantities, limitIndex)
+        float positionValue = positionQuantity * close * syminfo.pointvalue
+        float exitCommission = positionValue * COMMISSION_RATE
+        float finalEquity = cashBalance + positionValue - exitCommission
+        array.set(evaluationCashBalances, limitIndex, finalEquity)
+        array.set(evaluationPositionQuantities, limitIndex, 0.0)
+        array.set(evaluationFinalEquities, limitIndex, finalEquity)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Estado disponible para la sesión siguiente
 // ─────────────────────────────────────────────────────────────────────────────
 
 perWindow.add(perAtOpen, time)
@@ -437,32 +474,50 @@ if reportPublishedToday
      )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Métricas personalizadas
+// 6. Métricas personalizadas del límite activo
 // ─────────────────────────────────────────────────────────────────────────────
 
-float equityAtClose = f_equityAtClose(tradeAction, strategy.equity, close, strategy.position_size)
+float equityAtClose = f_equityAtClose(purchaseSignal, exitSignal, strategy.equity, close, strategy.position_size, purchaseQuantity)
+var float equityAtEvaluationEnd = na
+var bool performanceComplete = false
+bool collectPerformance = f_dateKey(time) >= f_dateKey(startTimeInput) and not performanceComplete
+
+if collectPerformance
+    equityAtEvaluationEnd := equityAtClose
 
 var ReturnStats dailyReturnStats = ReturnStats.new()
-dailyReturnStats.update(insideBacktestPeriod, equityAtClose)
+dailyReturnStats.update(collectPerformance, equityAtClose)
 float annualizedSharpe = dailyReturnStats.sharpe(riskFreeRateInput)
 
 var DrawdownState drawdownState = DrawdownState.new()
-drawdownState.update(insideBacktestPeriod, equityAtClose, time_close)
+drawdownState.update(collectPerformance, equityAtClose, time_close)
 
 float maximumDrawdownDurationDays = drawdownState.maximumDrawdownDurationMilliseconds / float(MILLISECONDS_PER_DAY)
-float totalReturnPercent = (equityAtClose / strategy.initial_capital - 1.0) * 100.0
-float maximumIntrabarDrawdownPercent = strategy.closedtrades + strategy.opentrades > 0 ? -math.abs(strategy.max_drawdown_percent) : na
-int totalTradesAtClose = strategy.closedtrades + strategy.opentrades + (entrySignal ? 1 : 0)
+float totalReturnPercent = na(equityAtEvaluationEnd) ? na : (equityAtEvaluationEnd / strategy.initial_capital - 1.0) * 100.0
+var int totalPurchases = 0
+
+if purchaseSignal
+    totalPurchases += 1
+
+int totalPurchasesAtClose = totalPurchases
+float currentMaximumIntrabarDrawdownPercent = totalPurchasesAtClose > 0 ? -math.abs(strategy.max_drawdown_percent) : na
+var float maximumIntrabarDrawdownPercentAtEvaluationEnd = na
+
+if collectPerformance
+    maximumIntrabarDrawdownPercentAtEvaluationEnd := currentMaximumIntrabarDrawdownPercent
+
+if exitSignal
+    performanceComplete := true
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Visualización
 // ─────────────────────────────────────────────────────────────────────────────
 
-plot(showBandsInput ? perAtOpen : na, "PER de apertura", color = color.blue, linewidth = 2)
-plot(showBandsInput ? perMeanBeforeOpen : na, "Media previa", color = color.orange, linewidth = 2)
-lowerBandPlot = plot(showBandsInput ? lowerBandBeforeOpen : na, "Banda de compra", color = color.lime, linewidth = 2)
-upperBandPlot = plot(showBandsInput ? upperBandBeforeOpen : na, "Banda de venta", color = color.red, linewidth = 2)
-fill(lowerBandPlot, upperBandPlot, color = showBandsInput ? color.new(color.blue, 92) : na, title = "Canal del PER")
+plot(showDistanceInput ? perDistanceAtOpen : na, "Distancia ln(PER actual / PER mínimo)", color = color.blue, linewidth = 2)
+plot(showDistanceInput ? activeDistanceLimit : na, "Límite activo", color = color.lime, linewidth = 2)
+plot(showDistanceInput ? 0.0 : na, "Distancia cero", color = color.new(color.gray, 50))
+plot(perAtOpen, "PER de apertura", display = display.data_window)
+plot(minimumPerBeforeOpen, "PER mínimo previo de 3 años", display = display.data_window)
 
 plotshape(
      showEarningsInput and reportPublishedToday,
@@ -475,7 +530,7 @@ plotshape(
      size = size.tiny
  )
 plotshape(
-     showSignalsInput and entrySignal,
+     showSignalsInput and purchaseSignal,
      title = "Señal de compra",
      style = shape.labelup,
      location = location.belowbar,
@@ -487,7 +542,7 @@ plotshape(
  )
 plotshape(
      showSignalsInput and exitSignal,
-     title = "Señal de venta",
+     title = "Venta final",
      style = shape.labeldown,
      location = location.abovebar,
      color = color.red,
@@ -502,7 +557,15 @@ bgcolor(showInvalidBackgroundInput and not epsValidAtOpen ? color.new(color.red,
 var table dashboard = table.new(
      position.top_right,
      2,
-     12,
+     13,
+     border_color = color.new(chart.fg_color, 40),
+     border_width = 1,
+     force_overlay = true
+ )
+var table comparison = table.new(
+     position.bottom_right,
+     4,
+     DISTANCE_LIMIT_COUNT + 1,
      border_color = color.new(chart.fg_color, 40),
      border_width = 1,
      force_overlay = true
@@ -519,20 +582,51 @@ if barstate.islast
              modelReadyBeforeOpen
          )
         color statusColor = statusText == "Modelo listo" ? color.new(color.green, 25) : color.new(color.orange, 20)
-        color returnColor = totalReturnPercent >= 0.0 ? color.new(color.green, 25) : color.new(color.red, 25)
+        color returnColor = na(totalReturnPercent) or totalReturnPercent >= 0.0 ? color.new(color.green, 25) : color.new(color.red, 25)
 
         table.cell(dashboard, 0, 0, "Métrica", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
         table.cell(dashboard, 1, 0, syminfo.ticker, text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
         f_tableRow(dashboard, 1, "Estado", statusText, chart.fg_color, statusColor)
         f_tableRow(dashboard, 2, "BPA TTM próximo", f_number(epsTtmNextSession), chart.fg_color, na)
         f_tableRow(dashboard, 3, "PER apertura", f_number(perAtOpen), chart.fg_color, na)
-        f_tableRow(dashboard, 4, "Media 365d", f_number(perMeanBeforeOpen), chart.fg_color, na)
-        f_tableRow(dashboard, 5, "Banda compra", f_number(lowerBandBeforeOpen), color.lime, na)
-        f_tableRow(dashboard, 6, "Banda venta", f_number(upperBandBeforeOpen), color.red, na)
-        f_tableRow(dashboard, 7, "Rentabilidad total", f_percent(totalReturnPercent), chart.fg_color, returnColor)
-        f_tableRow(dashboard, 8, "Máx. drawdown", f_percent(maximumIntrabarDrawdownPercent), color.red, na)
-        f_tableRow(dashboard, 9, "Máx. tiempo DD", f_number(maximumDrawdownDurationDays) + " días", chart.fg_color, na)
-        f_tableRow(dashboard, 10, "Sharpe anualizado", f_number(annualizedSharpe), chart.fg_color, na)
-        f_tableRow(dashboard, 11, "Operaciones", str.tostring(totalTradesAtClose), chart.fg_color, na)
+        f_tableRow(dashboard, 4, "Mínimo PER 3a", f_number(minimumPerBeforeOpen), chart.fg_color, na)
+        f_tableRow(dashboard, 5, "Distancia", f_number(perDistanceAtOpen), color.blue, na)
+        f_tableRow(dashboard, 6, "Límite activo", f_number(activeDistanceLimit), color.lime, na)
+        f_tableRow(dashboard, 7, "Apalancamiento objetivo", f_number(TARGET_LEVERAGE) + "x", chart.fg_color, na)
+        f_tableRow(dashboard, 8, "Rentabilidad total", f_percent(totalReturnPercent), chart.fg_color, returnColor)
+        f_tableRow(dashboard, 9, "Máx. drawdown", f_percent(maximumIntrabarDrawdownPercentAtEvaluationEnd), color.red, na)
+        f_tableRow(dashboard, 10, "Máx. tiempo DD", f_number(maximumDrawdownDurationDays) + " días", chart.fg_color, na)
+        f_tableRow(dashboard, 11, "Sharpe anualizado", f_number(annualizedSharpe), chart.fg_color, na)
+        f_tableRow(dashboard, 12, "Compras", str.tostring(totalPurchasesAtClose), chart.fg_color, na)
     else
-        table.clear(dashboard, 0, 0, 1, 11)
+        table.clear(dashboard, 0, 0, 1, 12)
+
+    if showComparisonInput
+        table.cell(comparison, 0, 0, "Límite", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
+        table.cell(comparison, 1, 0, "Compras", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
+        table.cell(comparison, 2, 0, "Primera compra", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
+        table.cell(comparison, 3, 0, "Rentabilidad", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
+
+        for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
+            float distanceLimit = array.get(distanceLimits, limitIndex)
+            int evaluationPurchaseCount = array.get(evaluationPurchaseCounts, limitIndex)
+            int evaluationFirstPurchaseTime = array.get(evaluationFirstPurchaseTimes, limitIndex)
+            float evaluationFinalEquity = array.get(evaluationFinalEquities, limitIndex)
+            float evaluationReturnPercent = na
+            if evaluationPurchaseCount > 0 and not na(evaluationFinalEquity)
+                evaluationReturnPercent := (evaluationFinalEquity / strategy.initial_capital - 1.0) * 100.0
+            bool activeLimit = limitIndex == activeDistanceLimitInput - 1
+            color rowBackground = activeLimit ? color.new(color.blue, 85) : na
+            color evaluationReturnColor = if na(evaluationReturnPercent)
+                chart.fg_color
+            else if evaluationReturnPercent >= 0.0
+                color.lime
+            else
+                color.red
+
+            table.cell(comparison, 0, limitIndex + 1, f_number(distanceLimit), text_color = chart.fg_color, bgcolor = rowBackground)
+            table.cell(comparison, 1, limitIndex + 1, str.tostring(evaluationPurchaseCount), text_color = chart.fg_color, bgcolor = rowBackground)
+            table.cell(comparison, 2, limitIndex + 1, f_dateText(evaluationFirstPurchaseTime), text_color = chart.fg_color, bgcolor = rowBackground)
+            table.cell(comparison, 3, limitIndex + 1, f_percent(evaluationReturnPercent), text_color = evaluationReturnColor, bgcolor = rowBackground)
+    else
+        table.clear(comparison, 0, 0, 3, DISTANCE_LIMIT_COUNT)
