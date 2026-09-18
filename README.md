@@ -18,7 +18,7 @@ No está diseñada para ETF, índices, criptomonedas ni activos sin resultados t
 1. Abre TradingView y carga el gráfico de una empresa, por ejemplo NASDAQ:MSFT.
 2. Selecciona un gráfico estándar con temporalidad **1D**.
 3. Abre la pestaña **Pine Editor**.
-4. Crea una estrategia nueva y sustituye su contenido por el de `pe_mean_reversion_strategy.pine`.
+4. Crea una estrategia nueva y sustituye su contenido por el de `Strategy.pine`.
 5. Guarda el script y pulsa **Añadir al gráfico**.
 6. Elige cuál de los diez límites debe usar el Strategy Tester y configura el período del backtest.
 7. Consulta el informe nativo para el límite activo y la tabla comparativa para los diez límites.
