@@ -1,7 +1,7 @@
 //@version=6
 strategy(
-     "Compra por distancia al PER mínimo histórico",
-     shorttitle = "PER Distance Buy",
+     "Compra por PER y distancia a SMA 68",
+     shorttitle = "PER + SMA Distance",
      overlay = false,
      initial_capital = 100000,
      default_qty_type = strategy.fixed,
@@ -29,8 +29,11 @@ const string GROUP_VISUALS = "Visualización"
 const int MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
 const int HISTORICAL_YEARS = 3
 const int DISTANCE_LIMIT_COUNT = 10
+const int SMA_LENGTH = 68
+const int SMA_WINDOW_DAYS = 30
 const float COMMISSION_RATE = 0.00035
 const float MIN_PURCHASE_EQUITY_FRACTION = 0.000001
+const float SMA_DISTANCE_FILTER_FRACTION = 0.20
 const float TARGET_LEVERAGE = 1.6
 
 int minObservationsInput = input.int(
@@ -81,7 +84,7 @@ float riskFreeRateInput = input.float(
      tooltip = "Se usa en el Sharpe diario personalizado del límite activo."
  )
 
-bool showDistanceInput = input.bool(true, "Mostrar distancia y límite activo", group = GROUP_VISUALS)
+bool showDistanceInput = input.bool(true, "Mostrar distancias y referencias", group = GROUP_VISUALS)
 bool showEarningsInput = input.bool(true, "Marcar publicaciones", group = GROUP_VISUALS)
 bool showSignalsInput = input.bool(true, "Marcar señal de compra", group = GROUP_VISUALS)
 bool showInvalidBackgroundInput = input.bool(true, "Sombrear PER inválido", group = GROUP_VISUALS)
@@ -99,6 +102,11 @@ type PerWindow
     array<int> observationTimes
     array<float> perValues
     int firstValidObservationTime = na
+
+type SmaDistanceHistory
+    array<float> completedMaximumDistances
+    int windowStartTime = na
+    float currentMaximumDistance = na
 
 type ReturnStats
     float previousEquity = na
@@ -216,6 +224,11 @@ f_perDistance(float currentPer, float minimumPer) =>
     float perDistance = validRatio ? math.log(currentPer / minimumPer) : na
     perDistance
 
+f_smaDistance(float price, float sma) =>
+    bool validDistance = not na(price) and not na(sma) and sma > 0.0 and price < sma
+    float smaDistance = validDistance ? (sma - price) / sma : na
+    smaDistance
+
 f_belowDistanceLimit(float perDistance, bool modelReady, float distanceLimit) =>
     bool belowDistanceLimit = not na(perDistance) and perDistance < distanceLimit
     bool purchaseCondition = modelReady and belowDistanceLimit
@@ -230,6 +243,52 @@ f_purchaseNotional(float currentEquity, float currentPositionValue) =>
 f_leverage(float positionValue, float equity) =>
     float leverage = equity > 0.0 ? positionValue / equity : na
     leverage
+
+method prepareWindow(SmaDistanceHistory this, int currentTime) =>
+    int windowDurationMilliseconds = SMA_WINDOW_DAYS * MILLISECONDS_PER_DAY
+
+    if na(this.windowStartTime)
+        this.windowStartTime := currentTime
+    else
+        while currentTime >= this.windowStartTime + windowDurationMilliseconds
+            if not na(this.currentMaximumDistance)
+                array.push(this.completedMaximumDistances, this.currentMaximumDistance)
+            this.windowStartTime += windowDurationMilliseconds
+            this.currentMaximumDistance := na
+    this
+
+method addCurrentDistance(SmaDistanceHistory this, float smaDistance) =>
+    if not na(smaDistance)
+        if na(this.currentMaximumDistance)
+            this.currentMaximumDistance := smaDistance
+        else
+            this.currentMaximumDistance := math.max(this.currentMaximumDistance, smaDistance)
+    this
+
+method referenceStatistics(SmaDistanceHistory this) =>
+    int completedWindowCount = array.size(this.completedMaximumDistances)
+    float maximumWindowDistance = na
+
+    if completedWindowCount > 0
+        maximumWindowDistance := array.get(this.completedMaximumDistances, 0)
+        if completedWindowCount > 1
+            for index = 1 to completedWindowCount - 1
+                float windowDistance = array.get(this.completedMaximumDistances, index)
+                maximumWindowDistance := math.max(maximumWindowDistance, windowDistance)
+
+    float minimumRetainedDistance = maximumWindowDistance * SMA_DISTANCE_FILTER_FRACTION
+    // La selección filtrada es temporal; la lista acumulada nunca se modifica.
+    array<float> retainedDistances = array.new_float()
+
+    if not na(minimumRetainedDistance)
+        for index = 0 to completedWindowCount - 1
+            float windowDistance = array.get(this.completedMaximumDistances, index)
+            if windowDistance >= minimumRetainedDistance
+                array.push(retainedDistances, windowDistance)
+
+    int retainedDistanceCount = array.size(retainedDistances)
+    float referenceMedian = retainedDistanceCount > 0 ? array.median(retainedDistances) : na
+    [completedWindowCount, retainedDistanceCount, maximumWindowDistance, minimumRetainedDistance, referenceMedian]
 
 f_equityAtClose(bool purchaseSignal, bool exitSignal, float currentEquity, float price, float positionSize, float purchaseQuantity) =>
     float quantity = 0.0
@@ -284,15 +343,25 @@ method update(DrawdownState this, bool trackDrawdown, float equity, int currentC
             this.maximumDrawdownDurationMilliseconds := math.max(this.maximumDrawdownDurationMilliseconds, currentCloseTime - this.drawdownStartTime)
     this
 
-f_modelStatus(bool epsValid, string epsStatus, bool fullCalendarWindow, int observationCount, int minimumObservations, bool modelReady) =>
+f_modelStatus(
+     bool epsValid,
+     string epsStatus,
+     bool fullCalendarWindow,
+     int observationCount,
+     int minimumObservations,
+     bool perModelReady,
+     bool smaModelReady
+ ) =>
     string modelStatus = if not epsValid
         epsStatus
     else if not fullCalendarWindow
         "Calentando ventana de 3 años"
     else if observationCount < minimumObservations
         "Observaciones insuficientes"
-    else if not modelReady
+    else if not perModelReady
         "Mínimo no disponible"
+    else if not smaModelReady
+        "Esperando referencia SMA"
     else
         "Modelo listo"
     modelStatus
@@ -365,7 +434,25 @@ var array<float> distanceLimits = array.from(
 float activeDistanceLimit = array.get(distanceLimits, activeDistanceLimitInput - 1)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Señal en la apertura y ejecución en el cierre
+// 3. Referencia de distancia a la SMA conocida antes de la apertura
+// ─────────────────────────────────────────────────────────────────────────────
+
+float smaAtClose = ta.sma(close, SMA_LENGTH)
+float smaKnownAtOpen = smaAtClose[1]
+float smaDistanceAtOpen = f_smaDistance(open, smaKnownAtOpen)
+float smaDistanceAtClose = f_smaDistance(close, smaAtClose)
+var SmaDistanceHistory smaDistanceHistory = SmaDistanceHistory.new(array.new_float())
+
+if not na(smaAtClose)
+    smaDistanceHistory.prepareWindow(time)
+
+[completedSmaWindowCount, retainedSmaDistanceCount, maximumSmaWindowDistance, minimumRetainedSmaDistance, smaReferenceMedian] = smaDistanceHistory.referenceStatistics()
+
+bool smaModelReadyBeforeOpen = not na(smaReferenceMedian)
+bool smaDistanceAboveReference = not na(smaDistanceAtOpen) and smaModelReadyBeforeOpen and smaDistanceAtOpen > smaReferenceMedian
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Señal en la apertura y ejecución en el cierre
 // ─────────────────────────────────────────────────────────────────────────────
 
 [insideBacktestPeriod, onInputFinalBacktestSession, finalBacktestSessionMissing] = f_periodState(time, time[1], startTimeInput, endTimeInput)
@@ -378,7 +465,7 @@ if finalBacktestSessionMissing
     runtime.error("La fecha final del backtest debe coincidir con una sesión bursátil.")
 
 bool belowActiveDistanceLimit = f_belowDistanceLimit(perDistanceAtOpen, modelReadyBeforeOpen, activeDistanceLimit)
-bool eligibleForPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and belowActiveDistanceLimit
+bool eligibleForPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and belowActiveDistanceLimit and smaDistanceAboveReference
 float currentPositionValue = math.abs(strategy.position_size) * close * syminfo.pointvalue
 float purchaseNotional = eligibleForPurchase ? f_purchaseNotional(strategy.equity, currentPositionValue) : 0.0
 float purchaseQuantity = close > 0.0 and syminfo.pointvalue > 0.0 ? purchaseNotional / (close * syminfo.pointvalue) : 0.0
@@ -396,6 +483,8 @@ if purchaseSignal
          " | Mínimo 3a " + f_number(minimumPerBeforeOpen) +
          " | Distancia " + f_number(perDistanceAtOpen) +
          " | Límite " + f_number(activeDistanceLimit) +
+         " | Distancia SMA " + f_number(smaDistanceAtOpen) +
+         " | Mediana SMA " + f_number(smaReferenceMedian) +
          " | Nominal " + f_number(purchaseNotional) +
          " | Apalancamiento " + f_number(leverageAfterPurchase) + "x" +
          " | Ejecución al cierre"
@@ -404,14 +493,19 @@ else if exitSignal
     strategy.close_all(comment = "Última vela completa del gráfico")
     log.info("Venta | Última vela completa del gráfico | Ejecución al cierre")
 
-if modelReadyBeforeOpen and not modelReadyBeforeOpen[1]
-    log.info("Modelo listo | " + str.tostring(observationCountBeforeOpen) + " aperturas válidas")
+bool combinedModelReadyBeforeOpen = modelReadyBeforeOpen and smaModelReadyBeforeOpen
+
+if combinedModelReadyBeforeOpen and not combinedModelReadyBeforeOpen[1]
+    log.info(
+         "Modelo listo | " + str.tostring(observationCountBeforeOpen) + " aperturas PER válidas" +
+         " | " + str.tostring(completedSmaWindowCount) + " máximos SMA acumulados"
+     )
 
 if not epsValidAtOpen and epsValidAtOpen[1]
     log.warning("BPA TTM inválido | " + epsStatusAtOpen)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Comparación simultánea de los diez límites
+// 5. Comparación simultánea de los diez límites
 // ─────────────────────────────────────────────────────────────────────────────
 
 var array<float> evaluationCashBalances = array.new_float(DISTANCE_LIMIT_COUNT, strategy.initial_capital)
@@ -420,7 +514,7 @@ var array<int> evaluationFirstPurchaseTimes = array.new_int(DISTANCE_LIMIT_COUNT
 var array<int> evaluationPurchaseCounts = array.new_int(DISTANCE_LIMIT_COUNT, 0)
 var array<float> evaluationFinalEquities = array.new_float(DISTANCE_LIMIT_COUNT, na)
 
-bool eligibleForEvaluationPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and modelReadyBeforeOpen and not na(perDistanceAtOpen)
+bool eligibleForEvaluationPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and modelReadyBeforeOpen and not na(perDistanceAtOpen) and smaDistanceAboveReference
 
 if eligibleForEvaluationPurchase
     for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
@@ -456,10 +550,11 @@ if onLastCompleteChartSession
         array.set(evaluationFinalEquities, limitIndex, finalEquity)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Estado disponible para la sesión siguiente
+// 6. Estado disponible para la sesión siguiente
 // ─────────────────────────────────────────────────────────────────────────────
 
 perWindow.add(perAtOpen, time)
+smaDistanceHistory.addCurrentDistance(smaDistanceAtClose)
 
 if reportPublishedToday
     epsHistory.add(standardizedEpsEvent)
@@ -474,7 +569,7 @@ if reportPublishedToday
      )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Métricas personalizadas del límite activo
+// 7. Métricas personalizadas del límite activo
 // ─────────────────────────────────────────────────────────────────────────────
 
 float equityAtClose = f_equityAtClose(purchaseSignal, exitSignal, strategy.equity, close, strategy.position_size, purchaseQuantity)
@@ -516,8 +611,13 @@ if exitSignal
 plot(showDistanceInput ? perDistanceAtOpen : na, "Distancia ln(PER actual / PER mínimo)", color = color.blue, linewidth = 2)
 plot(showDistanceInput ? activeDistanceLimit : na, "Límite activo", color = color.lime, linewidth = 2)
 plot(showDistanceInput ? 0.0 : na, "Distancia cero", color = color.new(color.gray, 50))
+plot(showDistanceInput ? smaDistanceAtOpen : na, "Distancia de apertura a SMA 68", color = color.orange, linewidth = 2, format = format.percent)
+plot(showDistanceInput ? smaReferenceMedian : na, "Mediana filtrada de máximos SMA", color = color.purple, linewidth = 2, format = format.percent)
 plot(perAtOpen, "PER de apertura", display = display.data_window)
 plot(minimumPerBeforeOpen, "PER mínimo previo de 3 años", display = display.data_window)
+plot(smaKnownAtOpen, "SMA 68 conocida en la apertura", display = display.data_window)
+plot(maximumSmaWindowDistance, "Máxima distancia de ventana SMA", display = display.data_window, format = format.percent)
+plot(minimumRetainedSmaDistance, "Corte del 20% para la mediana SMA", display = display.data_window, format = format.percent)
 
 plotshape(
      showEarningsInput and reportPublishedToday,
@@ -557,7 +657,7 @@ bgcolor(showInvalidBackgroundInput and not epsValidAtOpen ? color.new(color.red,
 var table dashboard = table.new(
      position.top_right,
      2,
-     13,
+     19,
      border_color = color.new(chart.fg_color, 40),
      border_width = 1,
      force_overlay = true
@@ -579,7 +679,8 @@ if barstate.islast
              fullCalendarWindowBeforeOpen,
              observationCountBeforeOpen,
              minObservationsInput,
-             modelReadyBeforeOpen
+             modelReadyBeforeOpen,
+             smaModelReadyBeforeOpen
          )
         color statusColor = statusText == "Modelo listo" ? color.new(color.green, 25) : color.new(color.orange, 20)
         color returnColor = na(totalReturnPercent) or totalReturnPercent >= 0.0 ? color.new(color.green, 25) : color.new(color.red, 25)
@@ -592,14 +693,27 @@ if barstate.islast
         f_tableRow(dashboard, 4, "Mínimo PER 3a", f_number(minimumPerBeforeOpen), chart.fg_color, na)
         f_tableRow(dashboard, 5, "Distancia", f_number(perDistanceAtOpen), color.blue, na)
         f_tableRow(dashboard, 6, "Límite activo", f_number(activeDistanceLimit), color.lime, na)
-        f_tableRow(dashboard, 7, "Apalancamiento objetivo", f_number(TARGET_LEVERAGE) + "x", chart.fg_color, na)
-        f_tableRow(dashboard, 8, "Rentabilidad total", f_percent(totalReturnPercent), chart.fg_color, returnColor)
-        f_tableRow(dashboard, 9, "Máx. drawdown", f_percent(maximumIntrabarDrawdownPercentAtEvaluationEnd), color.red, na)
-        f_tableRow(dashboard, 10, "Máx. tiempo DD", f_number(maximumDrawdownDurationDays) + " días", chart.fg_color, na)
-        f_tableRow(dashboard, 11, "Sharpe anualizado", f_number(annualizedSharpe), chart.fg_color, na)
-        f_tableRow(dashboard, 12, "Compras", str.tostring(totalPurchasesAtClose), chart.fg_color, na)
+        f_tableRow(dashboard, 7, "SMA 68 previa", f_number(smaKnownAtOpen), chart.fg_color, na)
+        f_tableRow(dashboard, 8, "Distancia a SMA", f_percent(smaDistanceAtOpen * 100.0), color.orange, na)
+        f_tableRow(dashboard, 9, "Máximo de ventanas", f_percent(maximumSmaWindowDistance * 100.0), chart.fg_color, na)
+        f_tableRow(dashboard, 10, "Corte del 20%", f_percent(minimumRetainedSmaDistance * 100.0), chart.fg_color, na)
+        f_tableRow(dashboard, 11, "Mediana SMA", f_percent(smaReferenceMedian * 100.0), color.purple, na)
+        f_tableRow(
+             dashboard,
+             12,
+             "Ventanas / retenidas",
+             str.tostring(completedSmaWindowCount) + " / " + str.tostring(retainedSmaDistanceCount),
+             chart.fg_color,
+             na
+         )
+        f_tableRow(dashboard, 13, "Apalancamiento objetivo", f_number(TARGET_LEVERAGE) + "x", chart.fg_color, na)
+        f_tableRow(dashboard, 14, "Rentabilidad total", f_percent(totalReturnPercent), chart.fg_color, returnColor)
+        f_tableRow(dashboard, 15, "Máx. drawdown", f_percent(maximumIntrabarDrawdownPercentAtEvaluationEnd), color.red, na)
+        f_tableRow(dashboard, 16, "Máx. tiempo DD", f_number(maximumDrawdownDurationDays) + " días", chart.fg_color, na)
+        f_tableRow(dashboard, 17, "Sharpe anualizado", f_number(annualizedSharpe), chart.fg_color, na)
+        f_tableRow(dashboard, 18, "Compras", str.tostring(totalPurchasesAtClose), chart.fg_color, na)
     else
-        table.clear(dashboard, 0, 0, 1, 12)
+        table.clear(dashboard, 0, 0, 1, 18)
 
     if showComparisonInput
         table.cell(comparison, 0, 0, "Límite", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))

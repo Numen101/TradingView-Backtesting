@@ -1,6 +1,6 @@
-# Estrategia de compra por distancia al PER mínimo
+# Estrategia de compra por PER y distancia a SMA 68
 
-Esta estrategia compra una empresa cuando su PER punto-en-tiempo está suficientemente cerca del PER mínimo observado durante los tres años naturales anteriores. Utiliza precios diarios y únicamente resultados empresariales que ya habían sido publicados en cada fecha del backtest.
+Esta estrategia compra una empresa cuando su PER punto-en-tiempo está suficientemente cerca del PER mínimo observado durante los tres años naturales anteriores y, simultáneamente, su apertura está excepcionalmente alejada por debajo de la SMA 68. Utiliza precios diarios y únicamente resultados empresariales que ya habían sido publicados en cada fecha del backtest.
 
 La especificación funcional completa se encuentra en [Plan.md](Plan.md).
 
@@ -41,6 +41,22 @@ La distancia empleada es:
 
 Una distancia igual a cero indica que ambos PER coinciden. Una distancia negativa indica un nuevo mínimo respecto al historial disponible y una distancia positiva mide cuánto se ha separado el PER actual del mínimo en escala logarítmica.
 
+## Referencia de distancia a la SMA 68
+
+La estrategia calcula la SMA 68 de los cierres diarios. Para construir su historial, solo registra una distancia cuando el cierre está por debajo de su SMA:
+
+`D = (SMA 68 − cierre) / SMA 68`
+
+Desde la primera SMA disponible agrupa esas observaciones en ventanas consecutivas y no solapadas de 30 días naturales. Al terminar cada ventana añade a una lista persistente su mayor distancia. Una ventana sin cierres bajo la SMA no añade ningún valor. La ventana todavía abierta nunca participa en la señal.
+
+La lista de máximos completados se conserva intacta y se acumula durante toda la historia. Antes de evaluar cada apertura, la estrategia crea una selección temporal con las distancias mayores o iguales al 20% del máximo acumulado. La referencia es la mediana de los valores seleccionados; ni el filtrado ni el cálculo de la mediana modifican la lista original.
+
+Para la señal se utiliza la SMA 68 calculada hasta el cierre anterior, que es la disponible antes de la apertura actual:
+
+`D apertura = (SMA 68 previa − apertura) / SMA 68 previa`
+
+Esta distancia solo existe cuando la apertura está por debajo de la SMA.
+
 ## Señal y ejecución
 
 La estrategia compra si se cumplen simultáneamente estas condiciones:
@@ -50,8 +66,11 @@ La estrategia compra si se cumplen simultáneamente estas condiciones:
 - Hay tres años naturales completos de historial.
 - La ventana contiene al menos el número configurado de aperturas válidas, 200 por defecto.
 - `d < límite`.
+- Existe al menos una ventana SMA válida ya completada.
+- La apertura está por debajo de la SMA 68 previa.
+- `D apertura > mediana filtrada de máximos SMA`.
 
-La condición se evalúa en todas las sesiones. Mientras `d < límite`, la estrategia calcula el nominal adicional necesario para que el valor de la posición represente 1,6 veces el equity después de descontar la comisión de la nueva compra. Si el apalancamiento ya es igual o superior a 1,6×, no compra ni vende para reducirlo. Si posteriormente cae por debajo de 1,6× y la distancia continúa bajo el límite, vuelve a comprar para reajustarlo.
+La condición combinada se evalúa en todas las sesiones. Mientras se cumplan simultáneamente el criterio del PER y el de la SMA, la estrategia calcula el nominal adicional necesario para que el valor de la posición represente 1,6 veces el equity después de descontar la comisión de la nueva compra. Si el apalancamiento ya es igual o superior a 1,6×, no compra ni vende para reducirlo. Si posteriormente cae por debajo de 1,6× y ambas condiciones continúan cumpliéndose, vuelve a comprar para reajustarlo.
 
 La señal utiliza datos conocidos en la apertura y cada compra se simula al cierre de esa sesión mediante `process_orders_on_close = true`.
 
@@ -76,9 +95,9 @@ La fila resaltada corresponde al límite activo del Strategy Tester. Si un lími
 
 ## Paneles y métricas
 
-El panel inferior representa la distancia logarítmica, el límite activo y el nivel cero. El PER actual y su mínimo histórico también están disponibles en la ventana de datos.
+El panel inferior representa la distancia logarítmica del PER, el límite activo, el nivel cero, la distancia de apertura a la SMA y su mediana de referencia. El PER actual, su mínimo histórico, la SMA previa, el máximo acumulado y el corte del 20% también están disponibles en la ventana de datos.
 
-La tabla superior derecha resume el estado del modelo, BPA TTM, PER, mínimo histórico, distancia, límite activo, apalancamiento objetivo, rentabilidad, máximo drawdown, duración máxima del drawdown, Sharpe anualizado y número de compras para la estrategia nativa.
+La tabla superior derecha resume el estado del modelo, las variables del PER, las variables de la SMA, los recuentos de ventanas totales y retenidas, el apalancamiento objetivo y las métricas de la estrategia nativa.
 
 El informe nativo y la tabla comparativa tienen responsabilidades distintas: el informe muestra un único límite seleccionado; la tabla calcula los diez escenarios a la vez. Ambos valoran la posición en la última vela completa disponible en el gráfico.
 
@@ -88,6 +107,8 @@ El informe nativo y la tabla comparativa tienen responsabilidades distintas: el 
 - La fecha asociada a un resultado representa su fecha de publicación.
 - Un resultado se utiliza siempre desde la sesión siguiente, aunque se publicara antes de la apertura.
 - Las señales conocidas durante la sesión pueden prepararse para una ejecución Market-on-Close.
+- Las ventanas SMA son bloques fijos de 30×24 horas; no son meses naturales ni ventanas móviles superpuestas.
+- La señal compara la apertura con la SMA conocida al cierre anterior, mientras que el historial de máximos utiliza cierres y su SMA contemporánea.
 - El precio de cierre de la vela es el precio de ejecución empleado por el emulador.
 - Los costes son constantes y no dependen de liquidez, tamaño o volatilidad.
 - TradingView puede corregir retrospectivamente datos fundamentales; Pine no permite auditar todas sus versiones históricas.
@@ -105,7 +126,9 @@ El informe nativo y la tabla comparativa tienen responsabilidades distintas: el 
 3. Comprueba que el PER mínimo solo contiene observaciones de los tres años anteriores y excluye la apertura actual.
 4. Valida manualmente varias distancias con `ln(PER actual / PER mínimo)`.
 5. Comprueba que no hay compras antes de completar tres años y el mínimo de observaciones.
-6. Verifica que cada límite solo compra cuando la distancia es estrictamente menor y el apalancamiento está por debajo de 1,6×.
-7. Confirma que la única orden de venta se genera en la última vela completa del gráfico.
-8. Comprueba después de cada compra que `valor de la posición / equity` queda aproximadamente en 1,6.
-9. Compara la fila del límite activo con el número de compras y la rentabilidad mostrados por el Strategy Tester, teniendo en cuenta las limitaciones descritas arriba.
+6. Comprueba que cada bloque SMA completado añade como máximo un valor y que la ventana abierta no participa en la mediana.
+7. Verifica que el filtro temporal descarta solo para la mediana los valores inferiores a `máximo acumulado × 0,20`, sin eliminarlos de la lista histórica.
+8. Verifica que cada límite solo compra cuando la distancia PER es estrictamente menor, la distancia SMA es estrictamente mayor que su mediana y el apalancamiento está por debajo de 1,6×.
+9. Confirma que la única orden de venta se genera en la última vela completa del gráfico.
+10. Comprueba después de cada compra que `valor de la posición / equity` queda aproximadamente en 1,6.
+11. Compara la fila del límite activo con el número de compras y la rentabilidad mostrados por el Strategy Tester, teniendo en cuenta las limitaciones descritas arriba.
