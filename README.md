@@ -70,15 +70,15 @@ La estrategia compra si se cumplen simultáneamente estas condiciones:
 - La apertura está por debajo de la SMA 68 previa.
 - `D apertura > mediana filtrada de máximos SMA`.
 
-La condición combinada se evalúa en todas las sesiones. Mientras se cumplan simultáneamente el criterio del PER y el de la SMA, la estrategia calcula el nominal adicional necesario para que el valor de la posición represente 1,6 veces el equity después de descontar la comisión de la nueva compra. Si el apalancamiento ya es igual o superior a 1,6×, no compra ni vende para reducirlo. Si posteriormente cae por debajo de 1,6× y ambas condiciones continúan cumpliéndose, vuelve a comprar para reajustarlo.
+La condición combinada se evalúa en todas las sesiones. Mientras se cumplan simultáneamente el criterio del PER y el de la SMA, la estrategia calcula el nominal adicional necesario para que el valor de la posición alcance el apalancamiento objetivo después de descontar la comisión de la nueva compra. Si el apalancamiento ya es igual o superior al objetivo, no compra ni vende para reducirlo. Si posteriormente cae por debajo del objetivo y ambas condiciones continúan cumpliéndose, vuelve a comprar para reajustarlo.
 
 La señal utiliza datos conocidos en la apertura y cada compra se simula al cierre de esa sesión mediante `process_orders_on_close = true`.
 
 Después de comprar, la estrategia mantiene la posición aunque cambie el BPA, el PER deje de ser válido o termine el período configurado. La única venta se ejecuta al cierre de la última vela completa disponible en el gráfico, para que TradingView registre una operación cerrada en el Strategy Tester.
 
-Se aplica un coste del 0,035% a cada compra y a la venta final. El tamaño de cada orden incorpora su propia comisión al resolver el ajuste a 1,6×.
+Se aplica un coste del 0,035% a cada compra y a la venta final. El tamaño de cada orden incorpora su propia comisión al resolver el ajuste al apalancamiento configurado.
 
-La estrategia configura un margen de mantenimiento del 25%, equivalente a una capacidad máxima teórica de 4×, pero sus órdenes tienen como objetivo 1,6×. Este margen adicional reduce el riesgo de una liquidación inmediata; una pérdida suficientemente grande todavía puede provocar un `Margin Call` automático del emulador de TradingView.
+El input **Apalancamiento objetivo** permite elegir un factor entre 1× y 4× y utiliza 1,6× por defecto. La estrategia configura un margen de mantenimiento del 25%, equivalente a una capacidad máxima teórica de 4×. Elegir exactamente 4× no deja margen de seguridad frente a comisiones o caídas; una pérdida suficientemente grande puede provocar un `Margin Call` automático del emulador de TradingView.
 
 ## Selección del límite
 
@@ -123,7 +123,7 @@ El informe nativo y la tabla resumen corresponden al único límite seleccionado
 5. Comprueba que no hay compras antes de completar tres años y el mínimo de observaciones.
 6. Comprueba que cada bloque SMA completado añade como máximo un valor y que la ventana abierta no participa en la mediana.
 7. Verifica que el filtro temporal descarta solo para la mediana los valores inferiores a `máximo acumulado × 0,20`, sin eliminarlos de la lista histórica.
-8. Verifica que cada límite solo compra cuando la distancia PER es estrictamente menor, la distancia SMA es estrictamente mayor que su mediana y el apalancamiento está por debajo de 1,6×.
+8. Verifica que cada límite solo compra cuando la distancia PER es estrictamente menor, la distancia SMA es estrictamente mayor que su mediana y el apalancamiento está por debajo del objetivo configurado.
 9. Confirma que la única orden de venta se genera en la última vela completa del gráfico.
-10. Comprueba después de cada compra que `valor de la posición / equity` queda aproximadamente en 1,6.
+10. Comprueba después de cada compra que `valor de la posición / equity` queda aproximadamente en el factor configurado.
 11. Compara la equity final, la rentabilidad y las compras de la tabla resumen con el informe del Strategy Tester.

@@ -2,7 +2,7 @@
 
 ## Resumen
 
-Crear una estrategia Pine Script v6 para gráficos diarios estándar de empresas con fundamentales. Será long-only, ajustará mediante compras la posición a un apalancamiento objetivo de 1,6×, reconstruirá el BPA TTM con los cuatro últimos resultados publicados y solo venderá en la última vela completa del gráfico.
+Crear una estrategia Pine Script v6 para gráficos diarios estándar de empresas con fundamentales. Será long-only, ajustará mediante compras la posición a un apalancamiento objetivo configurable de 1× a 4×, con 1,6× por defecto, reconstruirá el BPA TTM con los cuatro últimos resultados publicados y solo venderá en la última vela completa del gráfico.
 
 La señal combinará el PER de apertura respecto al PER mínimo conocido de los tres años naturales anteriores con una distancia extrema de la apertura por debajo de la SMA 68 conocida. Cuando se active, la compra se ejecutará mediante una orden de mercado al cierre de esa misma sesión.
 
@@ -39,14 +39,14 @@ La señal combinará el PER de apertura respecto al PER mínimo conocido de los 
 - Exigir que `d < límite`; la comparación es estricta.
 - Exigir además que exista una referencia SMA, que la apertura esté bajo la SMA 68 previa y que `D apertura > mediana SMA`; la comparación también es estricta.
 - Evaluar la condición en cada sesión, sin exigir un cruce del límite.
-- Comprar al cierre el nominal adicional necesario para que `valor posición / equity = 1,6` después de la comisión.
-- No hacer nada cuando el apalancamiento ya sea igual o superior a 1,6×, porque no se permiten ventas de ajuste.
-- Volver a comprar cuando ambos criterios sigan activos y el apalancamiento haya descendido por debajo de 1,6×.
+- Comprar al cierre el nominal adicional necesario para que `valor posición / equity` coincida con el factor configurado después de la comisión.
+- No hacer nada cuando el apalancamiento ya sea igual o superior al objetivo, porque no se permiten ventas de ajuste.
+- Volver a comprar cuando ambos criterios sigan activos y el apalancamiento haya descendido por debajo del objetivo.
 - No abrir una posición nueva en la última sesión efectiva del período.
 - No vender por distancia, BPA inválido ni fecha final configurada.
 - Vender toda la posición al cierre de la última vela completa disponible en el gráfico.
 - Mantener posiciones exclusivamente largas, sin órdenes límite ni stop-loss.
-- Configurar margen largo del 25%, que permite hasta 4× en el emulador, conservando un objetivo de órdenes de 1,6×.
+- Configurar margen largo del 25%, que permite seleccionar un objetivo de hasta 4× en el emulador.
 - Aplicar un coste del 0,035% a cada compra y a la venta final.
 
 ## Evaluación de límites
@@ -76,8 +76,8 @@ La señal combinará el PER de apertura respecto al PER mínimo conocido de los 
 - Confirmar que una ventana sin distancias válidas no añade un máximo.
 - Verificar que la lista acumulada permanece intacta y que el filtro del 20% solo se aplica a una selección temporal para calcular la mediana.
 - Confirmar que una distancia SMA igual a la mediana no compra y que debe ser estrictamente mayor.
-- Validar que cada compra deja el cociente entre posición y equity aproximadamente en 1,6 después de la comisión.
-- Confirmar que no hay ventas de ajuste cuando el apalancamiento supera 1,6×.
+- Validar que cada compra deja el cociente entre posición y equity aproximadamente en el objetivo configurado después de la comisión.
+- Confirmar que no hay ventas de ajuste cuando el apalancamiento supera el objetivo configurado.
 - Comparar la tabla resumen del límite activo con el informe del Strategy Tester.
 - Confirmar el coste del 0,035% en ambos lados y una única venta en la última vela completa.
 - Probar BPA negativo, trimestre ausente, historial insuficiente y activos sin resultados compatibles.

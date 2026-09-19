@@ -22,6 +22,7 @@ strategy(
 
 const string GROUP_MODEL = "Modelo"
 const string GROUP_LIMITS = "Límites de distancia"
+const string GROUP_EXECUTION = "Ejecución"
 const string GROUP_PERIOD = "Período del backtest"
 const string GROUP_METRICS = "Métricas"
 const string GROUP_VISUALS = "Visualización"
@@ -33,7 +34,6 @@ const int SMA_WINDOW_DAYS = 30
 const float COMMISSION_RATE = 0.00035
 const float MIN_PURCHASE_EQUITY_FRACTION = 0.000001
 const float SMA_DISTANCE_FILTER_FRACTION = 0.20
-const float TARGET_LEVERAGE = 1.6
 
 int minObservationsInput = input.int(
      200,
@@ -49,6 +49,15 @@ int activeDistanceLimitInput = input.int(
      options = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
      group = GROUP_MODEL,
      tooltip = "Selecciona cuál de los diez límites genera la orden nativa mostrada por el Strategy Tester."
+ )
+float targetLeverageInput = input.float(
+     1.6,
+     "Apalancamiento objetivo",
+     minval = 1.0,
+     maxval = 4.0,
+     step = 0.1,
+     group = GROUP_EXECUTION,
+     tooltip = "Relación objetivo entre el valor de la posición y la equity después de cada compra. El margen largo del 25% admite hasta 4x, pero 4x no deja margen de seguridad frente a comisiones o caídas."
  )
 
 float distanceLimit1Input = input.float(0.00, "Límite 1", step = 0.01, group = GROUP_LIMITS, inline = "limits1")
@@ -234,10 +243,10 @@ f_belowDistanceLimit(float perDistance, bool modelReady, float distanceLimit) =>
     bool purchaseCondition = modelReady and belowDistanceLimit
     purchaseCondition
 
-f_purchaseNotional(float currentEquity, float currentPositionValue) =>
-    float targetPositionValue = math.max(currentEquity, 0.0) * TARGET_LEVERAGE
+f_purchaseNotional(float currentEquity, float currentPositionValue, float targetLeverage) =>
+    float targetPositionValue = math.max(currentEquity, 0.0) * targetLeverage
     float notionalGap = targetPositionValue - currentPositionValue
-    float purchaseNotional = math.max(0.0, notionalGap / (1.0 + TARGET_LEVERAGE * COMMISSION_RATE))
+    float purchaseNotional = math.max(0.0, notionalGap / (1.0 + targetLeverage * COMMISSION_RATE))
     purchaseNotional
 
 f_leverage(float positionValue, float equity) =>
@@ -445,14 +454,16 @@ if finalBacktestSessionMissing
 bool belowActiveDistanceLimit = f_belowDistanceLimit(perDistanceAtOpen, modelReadyBeforeOpen, activeDistanceLimit)
 bool eligibleForPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and belowActiveDistanceLimit and smaDistanceAboveReference
 float currentPositionValue = math.abs(strategy.position_size) * close * syminfo.pointvalue
-float purchaseNotional = eligibleForPurchase ? f_purchaseNotional(strategy.equity, currentPositionValue) : 0.0
+float purchaseNotional = 0.0
+if eligibleForPurchase
+    purchaseNotional := f_purchaseNotional(strategy.equity, currentPositionValue, targetLeverageInput)
 float purchaseQuantity = close > 0.0 and syminfo.pointvalue > 0.0 ? purchaseNotional / (close * syminfo.pointvalue) : 0.0
 float minimumPurchaseNotional = math.max(strategy.equity, 0.0) * MIN_PURCHASE_EQUITY_FRACTION
 bool purchaseSignal = eligibleForPurchase and purchaseNotional > minimumPurchaseNotional and purchaseQuantity > 0.0
 bool exitSignal = onLastCompleteChartSession and strategy.position_size > 0.0
 
 if purchaseSignal
-    strategy.order("Long", strategy.long, qty = purchaseQuantity, comment = "Ajuste a apalancamiento 1,6x")
+    strategy.order("Long", strategy.long, qty = purchaseQuantity, comment = "Ajuste a apalancamiento objetivo")
     float equityAfterCommission = strategy.equity - purchaseNotional * COMMISSION_RATE
     float positionValueAfterPurchase = currentPositionValue + purchaseNotional
     float leverageAfterPurchase = f_leverage(positionValueAfterPurchase, equityAfterCommission)
@@ -464,6 +475,7 @@ if purchaseSignal
          " | Distancia SMA " + f_number(smaDistanceAtOpen) +
          " | Mediana SMA " + f_number(smaReferenceMedian) +
          " | Nominal " + f_number(purchaseNotional) +
+         " | Objetivo " + f_number(targetLeverageInput) + "x" +
          " | Apalancamiento " + f_number(leverageAfterPurchase) + "x" +
          " | Ejecución al cierre"
      )
