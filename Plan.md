@@ -53,19 +53,13 @@ La señal combinará el PER de apertura respecto al PER mínimo conocido de los 
 
 - Proporcionar diez límites de distancia editables con valores iniciales desde 0,00 hasta 0,18 en pasos de 0,02.
 - Permitir seleccionar uno de ellos para generar la orden nativa del Strategy Tester.
-- Simular en paralelo diez carteras apalancadas independientes, con todos sus reajustes mediante compras y una venta en la última vela completa.
-- Registrar para cada límite el número de compras y la primera fecha de compra.
-- Valorar cada cartera al cierre de la última vela completa del gráfico.
-- Mostrar la rentabilidad de cada cartera después de las comisiones de entrada y salida.
-- Mostrar **Sin compra** cuando un límite nunca se active.
 
 ## Visualización y resultados
 
 - Panel inferior con distancia logarítmica, límite activo, nivel cero, distancia SMA actual y mediana SMA.
 - PER actual, PER mínimo, SMA previa, máximo de las ventanas y corte del 20% disponibles en la ventana de datos.
 - Marcadores de publicaciones de resultados y de la compra correspondiente al límite activo.
-- Tabla resumen para la estrategia nativa.
-- Tabla comparativa para los diez límites con límite, número de compras, primera fecha y rentabilidad.
+- Tabla resumen en el panel con equity final, rentabilidad total, drawdown cierre-a-cierre, duración máxima del drawdown, Sharpe anualizado y compras.
 - Pine Logs limitados a disponibilidad del modelo, publicaciones, cambios a BPA inválido y compra.
 
 ## Pruebas
@@ -84,8 +78,7 @@ La señal combinará el PER de apertura respecto al PER mínimo conocido de los 
 - Confirmar que una distancia SMA igual a la mediana no compra y que debe ser estrictamente mayor.
 - Validar que cada compra deja el cociente entre posición y equity aproximadamente en 1,6 después de la comisión.
 - Confirmar que no hay ventas de ajuste cuando el apalancamiento supera 1,6×.
-- Confirmar que los diez límites se evalúan de forma independiente.
-- Comparar la fila activa con la orden del Strategy Tester.
+- Comparar la tabla resumen del límite activo con el informe del Strategy Tester.
 - Confirmar el coste del 0,035% en ambos lados y una única venta en la última vela completa.
 - Probar BPA negativo, trimestre ausente, historial insuficiente y activos sin resultados compatibles.
 
@@ -96,6 +89,5 @@ La señal combinará el PER de apertura respecto al PER mínimo conocido de los 
 - El historial SMA emplea cierres; la señal utiliza la apertura y la SMA conocida al cierre anterior para evitar anticipación.
 - Los datos fundamentales pueden ser corregidos retrospectivamente por TradingView.
 - La fecha final configurada limita las entradas, pero la posición se mantiene hasta la última vela completa del gráfico para cerrar la operación en el Strategy Tester.
-- Cada límite puede acumular múltiples compras, pero solo genera una venta voluntaria al final.
-- El emulador puede ejecutar ventas forzosas por `Margin Call`; la comparación personalizada no las reproduce.
+- El límite seleccionado puede acumular múltiples compras, pero solo genera una venta voluntaria al final.
 - Un resultado histórico favorable no garantiza resultados futuros.

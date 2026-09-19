@@ -28,7 +28,6 @@ const string GROUP_VISUALS = "Visualización"
 
 const int MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
 const int HISTORICAL_YEARS = 3
-const int DISTANCE_LIMIT_COUNT = 10
 const int SMA_LENGTH = 68
 const int SMA_WINDOW_DAYS = 30
 const float COMMISSION_RATE = 0.00035
@@ -81,15 +80,14 @@ float riskFreeRateInput = input.float(
      minval = -99.0,
      step = 0.1,
      group = GROUP_METRICS,
-     tooltip = "Se usa en el Sharpe diario personalizado del límite activo."
+     tooltip = "Se usa en el Sharpe diario personalizado del límite activo. El cálculo incluye todas las sesiones del período, también aquellas sin posición."
  )
 
 bool showDistanceInput = input.bool(true, "Mostrar distancias y referencias", group = GROUP_VISUALS)
 bool showEarningsInput = input.bool(true, "Marcar publicaciones", group = GROUP_VISUALS)
 bool showSignalsInput = input.bool(true, "Marcar señal de compra", group = GROUP_VISUALS)
 bool showInvalidBackgroundInput = input.bool(true, "Sombrear PER inválido", group = GROUP_VISUALS)
-bool showDashboardInput = input.bool(true, "Mostrar resumen", group = GROUP_VISUALS)
-bool showComparisonInput = input.bool(true, "Mostrar comparación de límites", group = GROUP_VISUALS)
+bool showSummaryInput = input.bool(true, "Mostrar resumen", group = GROUP_VISUALS)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Estados encapsulados
@@ -118,6 +116,7 @@ type DrawdownState
     float peakEquity = na
     int peakEquityTime = na
     int drawdownStartTime = na
+    float maximumDrawdownPercent = 0.0
     int maximumDrawdownDurationMilliseconds = 0
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,13 +129,14 @@ f_number(float value) =>
 f_percent(float value) =>
     na(value) ? "n/d" : str.tostring(value, "#.##") + "%"
 
+f_summaryRow(table summary, int row, string label, string value, color valueColor) =>
+    table.cell(summary, 0, row, label, text_color = chart.fg_color, text_size = size.small)
+    table.cell(summary, 1, row, value, text_color = valueColor, text_size = size.small)
+
 f_dateKey(int timestampValue) =>
     year(timestampValue, syminfo.timezone) * 10000 +
      month(timestampValue, syminfo.timezone) * 100 +
      dayofmonth(timestampValue, syminfo.timezone)
-
-f_dateText(int timestampValue) =>
-    na(timestampValue) ? "Sin compra" : str.tostring(f_dateKey(timestampValue))
 
 f_threeYearsEarlier(int timestampValue) =>
     timestamp(
@@ -340,35 +340,13 @@ method update(DrawdownState this, bool trackDrawdown, float equity, int currentC
         else
             if na(this.drawdownStartTime)
                 this.drawdownStartTime := this.peakEquityTime
+            bool hasPositivePeakEquity = this.peakEquity > 0.0
+            float currentDrawdownPercent = 0.0
+            if hasPositivePeakEquity
+                currentDrawdownPercent := (this.peakEquity - equity) / this.peakEquity * 100.0
+            this.maximumDrawdownPercent := math.max(this.maximumDrawdownPercent, currentDrawdownPercent)
             this.maximumDrawdownDurationMilliseconds := math.max(this.maximumDrawdownDurationMilliseconds, currentCloseTime - this.drawdownStartTime)
     this
-
-f_modelStatus(
-     bool epsValid,
-     string epsStatus,
-     bool fullCalendarWindow,
-     int observationCount,
-     int minimumObservations,
-     bool perModelReady,
-     bool smaModelReady
- ) =>
-    string modelStatus = if not epsValid
-        epsStatus
-    else if not fullCalendarWindow
-        "Calentando ventana de 3 años"
-    else if observationCount < minimumObservations
-        "Observaciones insuficientes"
-    else if not perModelReady
-        "Mínimo no disponible"
-    else if not smaModelReady
-        "Esperando referencia SMA"
-    else
-        "Modelo listo"
-    modelStatus
-
-f_tableRow(table dashboard, int row, string label, string value, color valueColor, color valueBackground) =>
-    table.cell(dashboard, 0, row, label, text_color = chart.fg_color)
-    table.cell(dashboard, 1, row, value, text_color = valueColor, bgcolor = valueBackground)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Validación
@@ -505,52 +483,11 @@ if not epsValidAtOpen and epsValidAtOpen[1]
     log.warning("BPA TTM inválido | " + epsStatusAtOpen)
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Comparación simultánea de los diez límites
+// 5. Estado disponible para la sesión siguiente
 // ─────────────────────────────────────────────────────────────────────────────
 
-var array<float> evaluationCashBalances = array.new_float(DISTANCE_LIMIT_COUNT, strategy.initial_capital)
-var array<float> evaluationPositionQuantities = array.new_float(DISTANCE_LIMIT_COUNT, 0.0)
-var array<int> evaluationFirstPurchaseTimes = array.new_int(DISTANCE_LIMIT_COUNT, na)
-var array<int> evaluationPurchaseCounts = array.new_int(DISTANCE_LIMIT_COUNT, 0)
-var array<float> evaluationFinalEquities = array.new_float(DISTANCE_LIMIT_COUNT, na)
-
-bool eligibleForEvaluationPurchase = insideBacktestPeriod and not onFinalBacktestSession and epsValidAtOpen and modelReadyBeforeOpen and not na(perDistanceAtOpen) and smaDistanceAboveReference
-
-if eligibleForEvaluationPurchase
-    for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
-        float distanceLimit = array.get(distanceLimits, limitIndex)
-        bool belowEvaluationDistanceLimit = perDistanceAtOpen < distanceLimit
-
-        if belowEvaluationDistanceLimit
-            float cashBalance = array.get(evaluationCashBalances, limitIndex)
-            float positionQuantity = array.get(evaluationPositionQuantities, limitIndex)
-            float positionValue = positionQuantity * close * syminfo.pointvalue
-            float currentEquity = cashBalance + positionValue
-            float additionalNotional = f_purchaseNotional(currentEquity, positionValue)
-            float additionalQuantity = close > 0.0 and syminfo.pointvalue > 0.0 ? additionalNotional / (close * syminfo.pointvalue) : 0.0
-            float minimumAdditionalNotional = math.max(currentEquity, 0.0) * MIN_PURCHASE_EQUITY_FRACTION
-
-            if additionalNotional > minimumAdditionalNotional and additionalQuantity > 0.0
-                int purchaseCount = array.get(evaluationPurchaseCounts, limitIndex)
-                array.set(evaluationCashBalances, limitIndex, cashBalance - additionalNotional * (1.0 + COMMISSION_RATE))
-                array.set(evaluationPositionQuantities, limitIndex, positionQuantity + additionalQuantity)
-                array.set(evaluationPurchaseCounts, limitIndex, purchaseCount + 1)
-                if purchaseCount == 0
-                    array.set(evaluationFirstPurchaseTimes, limitIndex, time_close)
-
-if onLastCompleteChartSession
-    for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
-        float cashBalance = array.get(evaluationCashBalances, limitIndex)
-        float positionQuantity = array.get(evaluationPositionQuantities, limitIndex)
-        float positionValue = positionQuantity * close * syminfo.pointvalue
-        float exitCommission = positionValue * COMMISSION_RATE
-        float finalEquity = cashBalance + positionValue - exitCommission
-        array.set(evaluationCashBalances, limitIndex, finalEquity)
-        array.set(evaluationPositionQuantities, limitIndex, 0.0)
-        array.set(evaluationFinalEquities, limitIndex, finalEquity)
-
 // ─────────────────────────────────────────────────────────────────────────────
-// 6. Estado disponible para la sesión siguiente
+// Estado fundamental actualizado tras evaluar la sesión
 // ─────────────────────────────────────────────────────────────────────────────
 
 perWindow.add(perAtOpen, time)
@@ -559,7 +496,7 @@ smaDistanceHistory.addCurrentDistance(smaDistanceAtClose)
 if reportPublishedToday
     epsHistory.add(standardizedEpsEvent)
 
-[epsTtmNextSession, epsValidNextSession, epsStatusNextSession] = epsHistory.ttm()
+[epsTtmNextSession, _, _] = epsHistory.ttm()
 
 if reportPublishedToday
     log.info(
@@ -569,7 +506,7 @@ if reportPublishedToday
      )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 7. Métricas personalizadas del límite activo
+// 6. Métricas personalizadas del límite activo
 // ─────────────────────────────────────────────────────────────────────────────
 
 float equityAtClose = f_equityAtClose(purchaseSignal, exitSignal, strategy.equity, close, strategy.position_size, purchaseQuantity)
@@ -587,7 +524,9 @@ float annualizedSharpe = dailyReturnStats.sharpe(riskFreeRateInput)
 var DrawdownState drawdownState = DrawdownState.new()
 drawdownState.update(collectPerformance, equityAtClose, time_close)
 
-float maximumDrawdownDurationDays = drawdownState.maximumDrawdownDurationMilliseconds / float(MILLISECONDS_PER_DAY)
+float maximumDrawdownDurationDays = math.round(
+     drawdownState.maximumDrawdownDurationMilliseconds / float(MILLISECONDS_PER_DAY)
+ )
 float totalReturnPercent = na(equityAtEvaluationEnd) ? na : (equityAtEvaluationEnd / strategy.initial_capital - 1.0) * 100.0
 var int totalPurchases = 0
 
@@ -595,11 +534,8 @@ if purchaseSignal
     totalPurchases += 1
 
 int totalPurchasesAtClose = totalPurchases
-float currentMaximumIntrabarDrawdownPercent = totalPurchasesAtClose > 0 ? -math.abs(strategy.max_drawdown_percent) : na
-var float maximumIntrabarDrawdownPercentAtEvaluationEnd = na
-
-if collectPerformance
-    maximumIntrabarDrawdownPercentAtEvaluationEnd := currentMaximumIntrabarDrawdownPercent
+float maximumDrawdownPercent = totalPurchasesAtClose > 0 ? -drawdownState.maximumDrawdownPercent : na
+float maximumDrawdownDurationDaysAtClose = totalPurchasesAtClose > 0 ? maximumDrawdownDurationDays : na
 
 if exitSignal
     performanceComplete := true
@@ -618,7 +554,6 @@ plot(minimumPerBeforeOpen, "PER mínimo previo de 3 años", display = display.da
 plot(smaKnownAtOpen, "SMA 68 conocida en la apertura", display = display.data_window)
 plot(maximumSmaWindowDistance, "Máxima distancia de ventana SMA", display = display.data_window, format = format.percent)
 plot(minimumRetainedSmaDistance, "Corte del 20% para la mediana SMA", display = display.data_window, format = format.percent)
-
 plotshape(
      showEarningsInput and reportPublishedToday,
      title = "Resultados publicados",
@@ -654,93 +589,29 @@ plotshape(
 
 bgcolor(showInvalidBackgroundInput and not epsValidAtOpen ? color.new(color.red, 92) : na, title = "PER inválido")
 
-var table dashboard = table.new(
-     position.top_right,
-     2,
-     19,
-     border_color = color.new(chart.fg_color, 40),
-     border_width = 1,
-     force_overlay = true
- )
-var table comparison = table.new(
+var table summary = table.new(
      position.bottom_right,
-     4,
-     DISTANCE_LIMIT_COUNT + 1,
+     2,
+     7,
+     bgcolor = color.new(chart.bg_color, 5),
+     frame_color = color.new(chart.fg_color, 40),
+     frame_width = 1,
      border_color = color.new(chart.fg_color, 40),
-     border_width = 1,
-     force_overlay = true
+     border_width = 1
  )
 
 if barstate.islast
-    if showDashboardInput
-        string statusText = f_modelStatus(
-             epsValidNextSession,
-             epsStatusNextSession,
-             fullCalendarWindowBeforeOpen,
-             observationCountBeforeOpen,
-             minObservationsInput,
-             modelReadyBeforeOpen,
-             smaModelReadyBeforeOpen
-         )
-        color statusColor = statusText == "Modelo listo" ? color.new(color.green, 25) : color.new(color.orange, 20)
-        color returnColor = na(totalReturnPercent) or totalReturnPercent >= 0.0 ? color.new(color.green, 25) : color.new(color.red, 25)
+    if showSummaryInput
+        color returnColor = na(totalReturnPercent) or totalReturnPercent >= 0.0 ? color.lime : color.red
+        color sharpeColor = na(annualizedSharpe) or annualizedSharpe >= 0.0 ? color.lime : color.red
 
-        table.cell(dashboard, 0, 0, "Métrica", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-        table.cell(dashboard, 1, 0, syminfo.ticker, text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-        f_tableRow(dashboard, 1, "Estado", statusText, chart.fg_color, statusColor)
-        f_tableRow(dashboard, 2, "BPA TTM próximo", f_number(epsTtmNextSession), chart.fg_color, na)
-        f_tableRow(dashboard, 3, "PER apertura", f_number(perAtOpen), chart.fg_color, na)
-        f_tableRow(dashboard, 4, "Mínimo PER 3a", f_number(minimumPerBeforeOpen), chart.fg_color, na)
-        f_tableRow(dashboard, 5, "Distancia", f_number(perDistanceAtOpen), color.blue, na)
-        f_tableRow(dashboard, 6, "Límite activo", f_number(activeDistanceLimit), color.lime, na)
-        f_tableRow(dashboard, 7, "SMA 68 previa", f_number(smaKnownAtOpen), chart.fg_color, na)
-        f_tableRow(dashboard, 8, "Distancia a SMA", f_percent(smaDistanceAtOpen * 100.0), color.orange, na)
-        f_tableRow(dashboard, 9, "Máximo de ventanas", f_percent(maximumSmaWindowDistance * 100.0), chart.fg_color, na)
-        f_tableRow(dashboard, 10, "Corte del 20%", f_percent(minimumRetainedSmaDistance * 100.0), chart.fg_color, na)
-        f_tableRow(dashboard, 11, "Mediana SMA", f_percent(smaReferenceMedian * 100.0), color.purple, na)
-        f_tableRow(
-             dashboard,
-             12,
-             "Ventanas / retenidas",
-             str.tostring(completedSmaWindowCount) + " / " + str.tostring(retainedSmaDistanceCount),
-             chart.fg_color,
-             na
-         )
-        f_tableRow(dashboard, 13, "Apalancamiento objetivo", f_number(TARGET_LEVERAGE) + "x", chart.fg_color, na)
-        f_tableRow(dashboard, 14, "Rentabilidad total", f_percent(totalReturnPercent), chart.fg_color, returnColor)
-        f_tableRow(dashboard, 15, "Máx. drawdown", f_percent(maximumIntrabarDrawdownPercentAtEvaluationEnd), color.red, na)
-        f_tableRow(dashboard, 16, "Máx. tiempo DD", f_number(maximumDrawdownDurationDays) + " días", chart.fg_color, na)
-        f_tableRow(dashboard, 17, "Sharpe anualizado", f_number(annualizedSharpe), chart.fg_color, na)
-        f_tableRow(dashboard, 18, "Compras", str.tostring(totalPurchasesAtClose), chart.fg_color, na)
+        table.cell(summary, 0, 0, "Resumen", text_color = chart.fg_color, text_size = size.small, bgcolor = color.new(color.gray, 70))
+        table.cell(summary, 1, 0, syminfo.ticker, text_color = chart.fg_color, text_size = size.small, bgcolor = color.new(color.gray, 70))
+        f_summaryRow(summary, 1, "Equity final", f_number(equityAtEvaluationEnd), chart.fg_color)
+        f_summaryRow(summary, 2, "Rentabilidad total", f_percent(totalReturnPercent), returnColor)
+        f_summaryRow(summary, 3, "Máx. drawdown", f_percent(maximumDrawdownPercent), color.red)
+        f_summaryRow(summary, 4, "Máx. duración DD", f_number(maximumDrawdownDurationDaysAtClose) + " días", chart.fg_color)
+        f_summaryRow(summary, 5, "Sharpe anualizado", f_number(annualizedSharpe), sharpeColor)
+        f_summaryRow(summary, 6, "Compras", str.tostring(totalPurchasesAtClose), chart.fg_color)
     else
-        table.clear(dashboard, 0, 0, 1, 18)
-
-    if showComparisonInput
-        table.cell(comparison, 0, 0, "Límite", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-        table.cell(comparison, 1, 0, "Compras", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-        table.cell(comparison, 2, 0, "Primera compra", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-        table.cell(comparison, 3, 0, "Rentabilidad", text_color = chart.fg_color, bgcolor = color.new(color.gray, 70))
-
-        for limitIndex = 0 to DISTANCE_LIMIT_COUNT - 1
-            float distanceLimit = array.get(distanceLimits, limitIndex)
-            int evaluationPurchaseCount = array.get(evaluationPurchaseCounts, limitIndex)
-            int evaluationFirstPurchaseTime = array.get(evaluationFirstPurchaseTimes, limitIndex)
-            float evaluationFinalEquity = array.get(evaluationFinalEquities, limitIndex)
-            float evaluationReturnPercent = na
-            if evaluationPurchaseCount > 0 and not na(evaluationFinalEquity)
-                evaluationReturnPercent := (evaluationFinalEquity / strategy.initial_capital - 1.0) * 100.0
-            bool activeLimit = limitIndex == activeDistanceLimitInput - 1
-            color rowBackground = activeLimit ? color.new(color.blue, 85) : na
-            color evaluationReturnColor = if na(evaluationReturnPercent)
-                chart.fg_color
-            else if evaluationReturnPercent >= 0.0
-                color.lime
-            else
-                color.red
-
-            table.cell(comparison, 0, limitIndex + 1, f_number(distanceLimit), text_color = chart.fg_color, bgcolor = rowBackground)
-            table.cell(comparison, 1, limitIndex + 1, str.tostring(evaluationPurchaseCount), text_color = chart.fg_color, bgcolor = rowBackground)
-            table.cell(comparison, 2, limitIndex + 1, f_dateText(evaluationFirstPurchaseTime), text_color = chart.fg_color, bgcolor = rowBackground)
-            table.cell(comparison, 3, limitIndex + 1, f_percent(evaluationReturnPercent), text_color = evaluationReturnColor, bgcolor = rowBackground)
-    else
-        table.clear(comparison, 0, 0, 3, DISTANCE_LIMIT_COUNT)
+        table.clear(summary, 0, 0, 1, 6)
