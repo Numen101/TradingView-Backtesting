@@ -1,0 +1,284 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © framolcue
+
+//@version=6
+indicator(
+     "EV/EBITDA TTM — capitalización diaria",
+     shorttitle = "EV/EBITDA",
+     overlay = false,
+     format = format.price,
+     precision = 2
+)
+
+//──────────────────────────────────────────────────────────────────────
+// Configuración
+//──────────────────────────────────────────────────────────────────────
+
+string cashMode = input.string(
+     "Efectivo + inversiones CP",
+     "Efectivo que se resta del EV",
+     options = [
+         "Efectivo + inversiones CP",
+         "Solo efectivo y equivalentes"
+     ]
+)
+
+bool showNegativeEbitda = input.bool(
+     false,
+     "Mostrar ratio cuando el EBITDA es negativo"
+)
+
+bool showTable = input.bool(
+     true,
+     "Mostrar tabla de datos"
+)
+
+//──────────────────────────────────────────────────────────────────────
+// Datos fundamentales
+//──────────────────────────────────────────────────────────────────────
+
+// Último número trimestral de acciones ordinarias en circulación.
+float sharesOutstanding = request.financial(
+     syminfo.tickerid,
+     "TOTAL_SHARES_OUTSTANDING",
+     "FQ",
+     gaps = barmerge.gaps_off,
+     ignore_invalid_symbol = true
+)
+
+// EBITDA de los últimos doce meses.
+// TradingView proporciona directamente el valor TTM.
+float ebitdaTTM = request.financial(
+     syminfo.tickerid,
+     "EBITDA",
+     "TTM",
+     gaps = barmerge.gaps_off,
+     ignore_invalid_symbol = true
+)
+
+// Última deuda total trimestral disponible.
+float totalDebt = request.financial(
+     syminfo.tickerid,
+     "TOTAL_DEBT",
+     "FQ",
+     gaps = barmerge.gaps_off,
+     ignore_invalid_symbol = true
+)
+
+// Efectivo y equivalentes.
+float cashEquivalents = request.financial(
+     syminfo.tickerid,
+     "CASH_N_EQUIVALENTS",
+     "FQ",
+     gaps = barmerge.gaps_off,
+     ignore_invalid_symbol = true
+)
+
+// Efectivo, equivalentes e inversiones financieras a corto plazo.
+float cashAndShortTermInvestments = request.financial(
+     syminfo.tickerid,
+     "CASH_N_SHORT_TERM_INVEST",
+     "FQ",
+     gaps = barmerge.gaps_off,
+     ignore_invalid_symbol = true
+)
+
+// Si no existe el dato ampliado, utiliza solo efectivo y equivalentes.
+float cashUsed =
+     cashMode == "Efectivo + inversiones CP" and
+     not na(cashAndShortTermInvestments)
+     ? cashAndShortTermInvestments
+     : cashEquivalents
+
+//──────────────────────────────────────────────────────────────────────
+// Cálculo del ratio
+//──────────────────────────────────────────────────────────────────────
+
+// Cambia en cada vela debido al movimiento del precio.
+float marketCapitalization = close * sharesOutstanding
+
+// EV = capitalización + deuda − efectivo.
+float enterpriseValue =
+     marketCapitalization +
+     totalDebt -
+     cashUsed
+
+bool validEbitda =
+     not na(ebitdaTTM) and
+     ebitdaTTM != 0 and
+     (showNegativeEbitda or ebitdaTTM > 0)
+
+bool validCalculation =
+     validEbitda and
+     not na(enterpriseValue)
+
+float evToEbitdaTTM =
+     validCalculation
+     ? enterpriseValue / ebitdaTTM
+     : na
+
+//──────────────────────────────────────────────────────────────────────
+// Gráfico
+//──────────────────────────────────────────────────────────────────────
+
+plot(
+     evToEbitdaTTM,
+     title = "EV/EBITDA TTM",
+     linewidth = 2,
+     color = color.blue
+)
+
+hline(
+     0,
+     title = "0x",
+     color = color.new(color.gray, 75)
+)
+
+// Datos adicionales disponibles en la ventana de datos.
+plot(
+     marketCapitalization,
+     title = "Capitalización",
+     display = display.data_window
+)
+
+plot(
+     enterpriseValue,
+     title = "Enterprise Value",
+     display = display.data_window
+)
+
+plot(
+     ebitdaTTM,
+     title = "EBITDA TTM",
+     display = display.data_window
+)
+
+plot(
+     totalDebt,
+     title = "Deuda total FQ",
+     display = display.data_window
+)
+
+plot(
+     cashUsed,
+     title = "Efectivo utilizado FQ",
+     display = display.data_window
+)
+
+plot(
+     sharesOutstanding,
+     title = "Acciones en circulación FQ",
+     display = display.data_window
+)
+
+//──────────────────────────────────────────────────────────────────────
+// Formato de cifras grandes
+//──────────────────────────────────────────────────────────────────────
+
+formatCompact(float value) =>
+    string texto = "n/d"
+
+    if not na(value)
+        float absoluteValue = math.abs(value)
+
+        if absoluteValue >= 1e12
+            texto := str.tostring(value / 1e12, "#.##") + " T"
+        else if absoluteValue >= 1e9
+            texto := str.tostring(value / 1e9, "#.##") + " B"
+        else if absoluteValue >= 1e6
+            texto := str.tostring(value / 1e6, "#.##") + " M"
+        else
+            texto := str.tostring(value, "#.##")
+
+    texto
+
+formatRatio(float value) =>
+    na(value)
+     ? "n/d"
+     : str.tostring(value, "#.##") + "x"
+
+//──────────────────────────────────────────────────────────────────────
+// Tabla informativa
+//──────────────────────────────────────────────────────────────────────
+
+var table stats = table.new(
+     position.top_right,
+     2,
+     7,
+     border_width = 1
+)
+
+if barstate.islast
+    if showTable
+        table.cell(
+             stats,
+             0,
+             0,
+             "Métrica",
+             bgcolor = color.new(color.gray, 50),
+             text_color = color.white
+        )
+
+        table.cell(
+             stats,
+             1,
+             0,
+             "Valor",
+             bgcolor = color.new(color.gray, 50),
+             text_color = color.white
+        )
+
+        table.cell(stats, 0, 1, "EV/EBITDA TTM")
+        table.cell(stats, 1, 1, formatRatio(evToEbitdaTTM))
+
+        table.cell(stats, 0, 2, "Capitalización")
+        table.cell(
+             stats,
+             1,
+             2,
+             formatCompact(marketCapitalization) +
+             " " +
+             syminfo.currency
+        )
+
+        table.cell(stats, 0, 3, "Deuda total")
+        table.cell(
+             stats,
+             1,
+             3,
+             formatCompact(totalDebt) +
+             " " +
+             syminfo.currency
+        )
+
+        table.cell(stats, 0, 4, "Efectivo")
+        table.cell(
+             stats,
+             1,
+             4,
+             formatCompact(cashUsed) +
+             " " +
+             syminfo.currency
+        )
+
+        table.cell(stats, 0, 5, "Enterprise Value")
+        table.cell(
+             stats,
+             1,
+             5,
+             formatCompact(enterpriseValue) +
+             " " +
+             syminfo.currency
+        )
+
+        table.cell(stats, 0, 6, "EBITDA TTM")
+        table.cell(
+             stats,
+             1,
+             6,
+             formatCompact(ebitdaTTM) +
+             " " +
+             syminfo.currency
+        )
+    else
+        table.clear(stats, 0, 0, 1, 6)
