@@ -1,67 +1,98 @@
-//@version=6
-indicator(
-     "PER",
-     shorttitle = "PER",
-     overlay = false,
-     format = format.price,
-     precision = 4
- )
 
-// ────────────────────────────────────────────────────────────────────────────
-// Estado fundamental
-// ────────────────────────────────────────────────────────────────────────────
+ //@version=6
+indicator("PER", shorttitle="PER", overlay=false, format=format.price, precision=4)
 
-type EpsHistory
-    array<float> standardizedEpsValues
+// ─────────────────────────────────────────────────────────
+// Funciones
+// ─────────────────────────────────────────────────────────
 
-method ttm(EpsHistory this) =>
-    int reportCount = array.size(this.standardizedEpsValues)
-    bool complete = reportCount == 4
-    bool valuesAvailable = complete
-    float total = 0.0
+// Guarda los últimos cuatro EPS disponibles
+saveEps(array<float> history, float eps) =>
+    if not na(eps)
+        array.push(history, eps)
+        if array.size(history) > 4
+            array.shift(history)
+    history
 
-    if complete
-        for index = 0 to 3
-            float value = array.get(this.standardizedEpsValues, index)
-            valuesAvailable := valuesAvailable and not na(value)
-            total += na(value) ? 0.0 : value
+// Calcula el EPS de los últimos cuatro resultados
+calculateEpsTtm(array<float> history) =>
+    array.size(history) == 4 ? array.sum(history) : na
 
-    bool epsValid = valuesAvailable and total > 0.0
-    float epsTtm = epsValid ? total : na
-    [epsTtm, epsValid]
+// ─────────────────────────────────────────────────────────
+// Configuración
+// ─────────────────────────────────────────────────────────
 
-method add(EpsHistory this, float standardizedEps) =>
-    array.push(this.standardizedEpsValues, standardizedEps)
-    if array.size(this.standardizedEpsValues) > 4
-        array.shift(this.standardizedEpsValues)
-    this
+string fuente = input.string(
+    "Eventos actual",
+    "Fuente del BPA",
+    options = ["Financiero TTM", "Eventos standardized", "Eventos actual"]
+)
 
-// ────────────────────────────────────────────────────────────────────────────
-// Cálculo del PER
-// ────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
+// Datos financieros
+// ─────────────────────────────────────────────────────────
+
+float epsFinancial = request.financial(
+    syminfo.tickerid,
+    "EARNINGS_PER_SHARE_DILUTED",
+    "TTM",
+    gaps = barmerge.gaps_off,
+    ignore_invalid_symbol = true
+)
 
 float reportedEpsEvent = request.earnings(
-     syminfo.tickerid,
-     earnings.actual,
-     gaps = barmerge.gaps_on,
-     lookahead = barmerge.lookahead_off,
-     ignore_invalid_symbol = true
- )
+    syminfo.tickerid,
+    earnings.actual,
+    gaps = barmerge.gaps_on,
+    lookahead = barmerge.lookahead_off,
+    ignore_invalid_symbol = true
+)
+
 float standardizedEpsEvent = request.earnings(
-     syminfo.tickerid,
-     earnings.standardized,
-     gaps = barmerge.gaps_on,
-     lookahead = barmerge.lookahead_off,
-     ignore_invalid_symbol = true
- )
+    syminfo.tickerid,
+    earnings.standardized,
+    gaps = barmerge.gaps_on,
+    lookahead = barmerge.lookahead_off,
+    ignore_invalid_symbol = true
+)
 
-bool reportPublished = not na(reportedEpsEvent)
-var EpsHistory epsHistory = EpsHistory.new(array.new_float())
+// ─────────────────────────────────────────────────────────
+// Histórico y cálculo del EPS TTM
+// ─────────────────────────────────────────────────────────
 
-if reportPublished
-    epsHistory.add(standardizedEpsEvent)
+var array<float> epsActualHistory = array.new_float()
+var array<float> epsStandardizedHistory = array.new_float()
 
-[epsTtm, epsValid] = epsHistory.ttm()
-float per = epsValid and close > 0.0 ? close / epsTtm : na
+float epsActual = calculateEpsTtm(saveEps(epsActualHistory, reportedEpsEvent))
+float epsStandardized = calculateEpsTtm(saveEps(epsStandardizedHistory, standardizedEpsEvent))
 
-plot(per, "PER", color = color.blue, linewidth = 2)
+// ─────────────────────────────────────────────────────────
+// Selección y cálculo del PER
+// ─────────────────────────────────────────────────────────
+
+float epsTtm = switch fuente
+    "Financiero TTM" => epsFinancial
+    "Eventos standardized" => epsStandardized
+    => epsActual
+
+float per = not na(epsTtm) and epsTtm > 0 and close > 0 ? close / epsTtm : na
+
+plot(per, "PER", color=color.blue, linewidth=2)
+
+// ─────────────────────────────────────────────────────────
+// Diagnóstico
+// ─────────────────────────────────────────────────────────
+
+plot(epsFinancial, "BPA TTM financial", display=display.data_window)
+plot(epsActual, "EPS actual", display=display.data_window)
+plot(epsStandardized, "EPS standardized", display=display.data_window)
+
+plotshape(
+    not na(reportedEpsEvent) and na(standardizedEpsEvent),
+    title="EPS standardized ausente",
+    style=shape.triangledown,
+    location=location.top,
+    color=color.orange,
+    size=size.tiny,
+    text="EPS?"
+)
